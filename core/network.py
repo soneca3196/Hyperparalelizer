@@ -385,7 +385,7 @@ class P2PNode:
 
     def _register_keepalive_handler(self) -> None:
         """Registra handler de KeepAlive."""
-        from utils.protocol import Ack, MSG_KEEPALIVE
+        from utils.protocol import Ack, MSG_KEEP_ALIVE
 
         keepalive_ref = self.keepalive
 
@@ -404,14 +404,14 @@ class P2PNode:
                 )
 
             ack = Ack(
-                ref_type=MSG_KEEPALIVE,
+                ref_type=MSG_KEEP_ALIVE,
                 ref_id=sender_id,
             ).to_dict()
 
             await send_message(writer, ack)
 
-        if MSG_KEEPALIVE not in self._handlers:
-            self._handlers[MSG_KEEPALIVE] = _handle_keepalive
+        if MSG_KEEP_ALIVE not in self._handlers:
+            self._handlers[MSG_KEEP_ALIVE] = _handle_keepalive
 
             log.debug(
                 "P2PNode: auto-registered KeepAlive handler"

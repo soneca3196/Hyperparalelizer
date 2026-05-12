@@ -15,6 +15,7 @@ MSG_TASK_RESULT = "TaskResult"
 MSG_REQUEST_BEST = "RequestBestModel"
 MSG_SEND_BEST = "SendBestModel"
 MSG_PUBSUB_SUBSCRIBE = "PubSubSubscribe"
+MSG_PUBSUB_UNSUBSCRIBE = "PubSubUnsubscribe"  # added
 MSG_PUBSUB_PUBLISH = "PubSubPublish"
 MSG_PUBSUB_NOTIFY = "PubSubNotify"
 MSG_ACK = "Ack"
@@ -123,6 +124,17 @@ class PubSubSubscribe:
 
 
 @dataclass
+class PubSubUnsubscribe:  # added
+    id_node: str
+    topic: str
+
+    type: str = field(default=MSG_PUBSUB_UNSUBSCRIBE, init=False)
+
+    def to_dict(self):
+        return asdict(self)
+
+
+@dataclass
 class PubSubPublish:
     id_node: str
     topic: str
@@ -179,8 +191,8 @@ _TYPE_MAP = {
     MSG_REQUEST_BEST: RequestBestModel,
     MSG_SEND_BEST: SendBestModel,
     MSG_PUBSUB_SUBSCRIBE: PubSubSubscribe,
+    MSG_PUBSUB_UNSUBSCRIBE: PubSubUnsubscribe,  # added
     MSG_PUBSUB_PUBLISH: PubSubPublish,
-    MSG_PUBSUB_NOTIFY: PubSubNotify,
     MSG_ACK: Ack,
     MSG_ERROR: ErrorMsg,
 }
