@@ -1,388 +1,486 @@
 """
-network.py - Async TCP communication layer.
-
-Responsibilities:
-    1. Temporary connections
-    2. Persistent connections
-    3. KeepAlive / heartbeat
-    4. Async TCP server with handlers
-
-Design:
-    - Pure asyncio
-    - Length-prefixed framing
-    - Coroutine-based handlers
+network.py - Camada TCP assíncrona do Hyperparalelizer.
 """
 
 import asyncio
 import time
-from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Coroutine, Dict, Optional
 
 from utils.logger import get_logger
-from utils.protocol import MSG_KEEP_ALIVE, KeepAlive
-from utils.serializer import (
-    HEADER_SIZE,
-    decode_body,
-    decode_header,
-    encode,
-)
+from utils.serializer import HEADER_SIZE, decode_body, decode_header, encode
 
 log = get_logger("network")
 
-# Handler signature
-HandlerFn = Callable[
-    [Dict[str, Any], asyncio.StreamWriter],
-    Awaitable[None],
-]
+# Timeout padrão para conexões temporárias
+DEFAULT_TIMEOUT = 10.0
 
-# Default timings
-KEEPALIVE_TIMEOUT_S = 30.0
-KEEPALIVE_INTERVAL_S = 10.0
+# Intervalo entre heartbeats
+KEEPALIVE_INTERVAL = 5.0
+
+# Máximo de heartbeats perdidos
+KEEPALIVE_MISSED_LIMIT = 3
 
 
-# ── Frame I/O ──────────────────────────────────────────────────────────────
+# I/O
 
-async def send_message(
-    writer: asyncio.StreamWriter,
-    data: Dict[str, Any],
-) -> None:
-    """Encodes and sends a message."""
+
+async def send_message(writer: asyncio.StreamWriter, data: Dict[str, Any]) -> None:
+    """Envia um frame serializado."""
     frame = encode(data)
-
     writer.write(frame)
     await writer.drain()
 
 
-async def recv_message(
-    reader: asyncio.StreamReader,
-) -> Optional[Dict[str, Any]]:
-    """Reads a full frame."""
+async def recv_message(reader: asyncio.StreamReader) -> Dict[str, Any]:
+    """Recebe um frame serializado."""
     raw_header = await reader.readexactly(HEADER_SIZE)
-
-    if not raw_header:
-        return None
-
-    size = decode_header(raw_header)
-
-    raw_body = await reader.readexactly(size)
-
+    payload_size = decode_header(raw_header)
+    raw_body = await reader.readexactly(payload_size)
     return decode_body(raw_body)
 
 
-# ── Temporary connections ─────────────────────────────────────────────────
+# Conexão temporária
+
 
 async def send_once(
-    host: str,
+    ip: str,
     port: int,
     data: Dict[str, Any],
-    expect_reply: bool = False,
-    timeout: float = 5.0,
+    *,
+    expect_reply: bool = True,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> Optional[Dict[str, Any]]:
-    """
-    Opens a temporary connection, sends data,
-    optionally waits for a reply, then closes.
-    """
+    """Abre conexão, envia mensagem e fecha."""
     try:
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port),
+            asyncio.open_connection(ip, port),
             timeout=timeout,
         )
 
+    except (OSError, asyncio.TimeoutError) as exc:
+        log.warning(f"send_once: failed to connect to {ip}:{port} — {exc}")
+        return None
+
+    try:
         await send_message(writer, data)
 
-        reply = None
+        if not expect_reply:
+            return None
 
-        if expect_reply:
-            reply = await asyncio.wait_for(
-                recv_message(reader),
-                timeout=timeout,
-            )
-
-        writer.close()
-        await writer.wait_closed()
+        reply = await asyncio.wait_for(
+            recv_message(reader),
+            timeout=timeout,
+        )
 
         return reply
 
-    except (
-        asyncio.TimeoutError,
-        ConnectionRefusedError,
-        OSError,
-    ) as exc:
+    except asyncio.TimeoutError:
         log.warning(
-            f"send_once failed for {host}:{port} - {exc}"
+            f"send_once: timeout waiting for reply from {ip}:{port}"
         )
         return None
 
+    except Exception as exc:
+        log.error(
+            f"send_once: error communicating with {ip}:{port} — {exc}"
+        )
+        return None
 
-# ── Persistent connections ────────────────────────────────────────────────
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+
+# Conexão persistente
+
 
 class PersistentConnection:
-    """Keeps a TCP connection open."""
+    """Conexão TCP reutilizável."""
 
-    def __init__(self, host: str, port: int):
-        self.host = host
+    def __init__(self, ip: str, port: int, timeout: float = DEFAULT_TIMEOUT):
+        self.ip = ip
         self.port = port
+        self.timeout = timeout
 
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
 
-        self._lock = asyncio.Lock()
-
     @property
     def is_open(self) -> bool:
-        return (
-            self._writer is not None
-            and not self._writer.is_closing()
-        )
+        return self._writer is not None and not self._writer.is_closing()
 
-    async def connect(
-        self,
-        timeout: float = 10.0,
-    ) -> None:
+    async def connect(self) -> None:
+        """Abre a conexão."""
+        if self.is_open:
+            return
+
         self._reader, self._writer = await asyncio.wait_for(
-            asyncio.open_connection(self.host, self.port),
-            timeout=timeout,
+            asyncio.open_connection(self.ip, self.port),
+            timeout=self.timeout,
         )
 
         log.info(
-            f"Persistent connection opened "
-            f"to {self.host}:{self.port}"
+            f"PersistentConnection: connected to {self.ip}:{self.port}"
         )
 
-    async def send(
-        self,
-        data: Dict[str, Any],
-    ) -> None:
-        async with self._lock:
-            if not self.is_open:
-                raise ConnectionError("Connection is closed")
+    async def send(self, data: Dict[str, Any]) -> None:
+        """Envia um frame."""
+        if not self.is_open:
+            raise RuntimeError(
+                "Connection is not open. Call connect() first."
+            )
 
-            await send_message(self._writer, data)
+        await send_message(self._writer, data)
 
-    async def recv(
-        self,
-        timeout: float = 60.0,
-    ) -> Optional[Dict[str, Any]]:
+    async def recv(self) -> Dict[str, Any]:
+        """Recebe um frame."""
+        if not self.is_open:
+            raise RuntimeError("Connection is not open.")
+
         return await asyncio.wait_for(
             recv_message(self._reader),
-            timeout=timeout,
+            timeout=self.timeout,
         )
 
     async def close(self) -> None:
+        """Fecha a conexão."""
         if self._writer:
-            self._writer.close()
-            await self._writer.wait_closed()
+            try:
+                self._writer.close()
+                await self._writer.wait_closed()
 
-            log.info(
-                f"Persistent connection closed "
-                f"with {self.host}:{self.port}"
-            )
+            except Exception:
+                pass
 
-            self._writer = None
-            self._reader = None
+            finally:
+                self._reader = None
+                self._writer = None
+
+        log.info(
+            f"PersistentConnection: closed {self.ip}:{self.port}"
+        )
 
 
-# ── TCP server ────────────────────────────────────────────────────────────
+# Callback: on_node_dead(node_id)
+NodeDeadCallback = Callable[[str], Coroutine[Any, Any, None]]
 
-class TCPServer:
-    """Async TCP server."""
+
+# KeepAlive
+
+
+class KeepAliveManager:
+    """Gerencia heartbeats."""
 
     def __init__(
         self,
-        host: str,
-        port: int,
         node_id: str,
+        on_dead: Optional[NodeDeadCallback] = None,
+        interval: float = KEEPALIVE_INTERVAL,
+        missed_limit: int = KEEPALIVE_MISSED_LIMIT,
     ):
+        self.node_id = node_id
+        self.on_dead = on_dead
+        self.interval = interval
+        self.missed_limit = missed_limit
+
+        # peer_id -> estado
+        self._peers: Dict[str, Dict[str, Any]] = {}
+
+        self._lock = asyncio.Lock()
+        self._running = False
+
+    async def register(self, peer_id: str, ip: str, port: int) -> None:
+        """Adiciona um peer."""
+        async with self._lock:
+            self._peers[peer_id] = {
+                "ip": ip,
+                "port": port,
+                "missed": 0,
+                "last_seen": time.monotonic(),
+            }
+
+        log.debug(
+            f"KeepAlive: registered {peer_id[:8]}… ({ip}:{port})"
+        )
+
+    async def unregister(self, peer_id: str) -> None:
+        """Remove um peer."""
+        async with self._lock:
+            self._peers.pop(peer_id, None)
+
+    async def record_heartbeat(self, peer_id: str) -> None:
+        """Atualiza heartbeat."""
+        async with self._lock:
+            if peer_id in self._peers:
+                self._peers[peer_id]["missed"] = 0
+                self._peers[peer_id]["last_seen"] = time.monotonic()
+
+    async def run(self) -> None:
+        """Loop principal."""
+        self._running = True
+
+        log.info(
+            f"KeepAlive: started (interval={self.interval}s)"
+        )
+
+        while self._running:
+            await asyncio.sleep(self.interval)
+            await self._probe_all()
+
+    async def stop(self) -> None:
+        self._running = False
+
+    async def _probe_all(self) -> None:
+        """Envia heartbeats."""
+        from utils.protocol import KeepAlive
+
+        async with self._lock:
+            peers_snapshot = dict(self._peers)
+
+        dead = []
+
+        for peer_id, info in peers_snapshot.items():
+            msg = KeepAlive(
+                id_node=self.node_id,
+            ).to_dict()
+
+            reply = await send_once(
+                info["ip"],
+                info["port"],
+                msg,
+                expect_reply=True,
+                timeout=self.interval * 0.8,
+            )
+
+            async with self._lock:
+                if peer_id not in self._peers:
+                    continue
+
+                if reply is not None:
+                    self._peers[peer_id]["missed"] = 0
+                    self._peers[peer_id]["last_seen"] = time.monotonic()
+
+                else:
+                    self._peers[peer_id]["missed"] += 1
+
+                    missed = self._peers[peer_id]["missed"]
+
+                    log.warning(
+                        f"KeepAlive: {peer_id[:8]}… did not respond "
+                        f"({missed}/{self.missed_limit})"
+                    )
+
+                    if missed >= self.missed_limit:
+                        dead.append(peer_id)
+
+        for peer_id in dead:
+            async with self._lock:
+                self._peers.pop(peer_id, None)
+
+            log.error(
+                f"KeepAlive: node {peer_id[:8]}… declared DEAD"
+            )
+
+            if self.on_dead:
+                try:
+                    await self.on_dead(peer_id)
+
+                except Exception as exc:
+                    log.error(
+                        f"KeepAlive: on_dead callback failed — {exc}"
+                    )
+
+
+# Handler: handler(msg, writer)
+MessageHandler = Callable[
+    [Dict[str, Any], asyncio.StreamWriter],
+    Coroutine[Any, Any, None],
+]
+
+
+# Servidor P2P
+
+
+class P2PNode:
+    """Servidor TCP assíncrono."""
+
+    def __init__(self, host: str, port: int, node_id: str):
         self.host = host
         self.port = port
         self.node_id = node_id
 
-        self._handlers: Dict[str, HandlerFn] = {}
+        self._handlers: Dict[str, MessageHandler] = {}
         self._server: Optional[asyncio.AbstractServer] = None
+
+        self.keepalive: Optional[KeepAliveManager] = None
+
+        # Cliente pub/sub opcional
+        self._pubsub_client: Optional[Any] = None
+
+    def attach_pubsub_client(self, client: Any) -> None:
+        """Associa um cliente pub/sub."""
+        self._pubsub_client = client
 
     def register_handler(
         self,
         msg_type: str,
-        fn: HandlerFn,
+        handler: MessageHandler,
     ) -> None:
-        """Registers a message handler."""
-        self._handlers[msg_type] = fn
+        """Registra um handler."""
+        self._handlers[msg_type] = handler
+
+        log.debug(
+            f"P2PNode: registered handler for '{msg_type}'"
+        )
 
     async def start(self) -> None:
+        """Inicia o servidor."""
         self._server = await asyncio.start_server(
-            self._handle_client,
+            self._handle_connection,
             self.host,
             self.port,
         )
 
+        addr = self._server.sockets[0].getsockname()
+
         log.info(
-            f"[{self.node_id}] listening on "
-            f"{self.host}:{self.port}"
+            f"P2PNode [{self.node_id[:8]}…] listening on {addr}"
         )
+
+        # Registra KeepAlive automaticamente
+        if self.keepalive:
+            self._register_keepalive_handler()
+            asyncio.create_task(self.keepalive.run())
 
         async with self._server:
             await self._server.serve_forever()
 
-    async def _handle_client(
+    async def stop(self) -> None:
+        """Encerra o servidor."""
+        # Remove subscriptions antes do shutdown
+        if self._pubsub_client is not None:
+            try:
+                await self._pubsub_client.unsubscribe_all()
+
+            except Exception as exc:
+                log.warning(
+                    f"P2PNode: unsubscribe_all failed on shutdown — {exc}"
+                )
+
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
+
+        if self.keepalive:
+            await self.keepalive.stop()
+
+        log.info(
+            f"P2PNode [{self.node_id[:8]}…] stopped"
+        )
+
+    # Interno
+
+    def _register_keepalive_handler(self) -> None:
+        """Registra handler de KeepAlive."""
+        from utils.protocol import Ack, MSG_KEEPALIVE
+
+        keepalive_ref = self.keepalive
+
+        async def _handle_keepalive(
+            msg: Dict[str, Any],
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            sender_id = msg.get("id_node", "")
+
+            if sender_id:
+                await keepalive_ref.record_heartbeat(sender_id)
+
+                log.debug(
+                    f"KeepAlive: heartbeat recorded from "
+                    f"{sender_id[:8]}…"
+                )
+
+            ack = Ack(
+                ref_type=MSG_KEEPALIVE,
+                ref_id=sender_id,
+            ).to_dict()
+
+            await send_message(writer, ack)
+
+        if MSG_KEEPALIVE not in self._handlers:
+            self._handlers[MSG_KEEPALIVE] = _handle_keepalive
+
+            log.debug(
+                "P2PNode: auto-registered KeepAlive handler"
+            )
+
+    async def _handle_connection(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        """Processa uma conexão."""
         peer = writer.get_extra_info("peername")
-
-        log.debug(f"New connection from {peer}")
 
         try:
             while True:
                 try:
-                    msg = await recv_message(reader)
+                    msg = await asyncio.wait_for(
+                        recv_message(reader),
+                        timeout=DEFAULT_TIMEOUT,
+                    )
+
+                except asyncio.TimeoutError:
+                    break
 
                 except asyncio.IncompleteReadError:
                     break
 
-                if msg is None:
-                    break
-
                 msg_type = msg.get("type", "")
-
                 handler = self._handlers.get(msg_type)
 
-                if handler:
-                    asyncio.create_task(
-                        handler(msg, writer)
-                    )
-                else:
+                if handler is None:
                     log.warning(
-                        f"No handler for '{msg_type}' "
+                        f"P2PNode: unknown type '{msg_type}' "
                         f"from {peer}"
                     )
 
-        except Exception as exc:
-            log.error(
-                f"Connection error with {peer}: {exc}"
-            )
+                    err = {
+                        "type": "Error",
+                        "code": "UNKNOWN_TYPE",
+                        "detail": msg_type,
+                    }
+
+                    await send_message(writer, err)
+                    continue
+
+                try:
+                    await handler(msg, writer)
+
+                except Exception as exc:
+                    log.error(
+                        f"P2PNode: handler '{msg_type}' failed — {exc}"
+                    )
+
+                    err = {
+                        "type": "Error",
+                        "code": "HANDLER_ERROR",
+                        "detail": str(exc),
+                    }
+
+                    try:
+                        await send_message(writer, err)
+
+                    except Exception:
+                        pass
 
         finally:
-            writer.close()
+            try:
+                writer.close()
+                await writer.wait_closed()
 
-            log.debug(
-                f"Connection closed with {peer}"
-            )
-
-
-# ── KeepAlive ─────────────────────────────────────────────────────────────
-
-class KeepAliveManager:
-    """Heartbeat manager."""
-
-    def __init__(
-        self,
-        node_id: str,
-        timeout_s: float = KEEPALIVE_TIMEOUT_S,
-        interval_s: float = KEEPALIVE_INTERVAL_S,
-        on_node_down: Optional[
-            Callable[[str], None]
-        ] = None,
-    ):
-        self.node_id = node_id
-
-        self.timeout_s = timeout_s
-        self.interval_s = interval_s
-
-        self.on_node_down = (
-            on_node_down
-            or (lambda nid: None)
-        )
-
-        # id_node -> (ip, port)
-        self._peers: Dict[str, Tuple[str, int]] = {}
-
-        # id_node -> last heartbeat time
-        self._last_seen: Dict[str, float] = {}
-
-    def add_peer(
-        self,
-        id_node: str,
-        ip: str,
-        port: int,
-    ) -> None:
-        self._peers[id_node] = (ip, port)
-
-        self._last_seen[id_node] = time.monotonic()
-
-        log.debug(
-            f"KeepAlive: added peer "
-            f"{id_node} ({ip}:{port})"
-        )
-
-    def remove_peer(
-        self,
-        id_node: str,
-    ) -> None:
-        self._peers.pop(id_node, None)
-        self._last_seen.pop(id_node, None)
-
-    def record_heartbeat(
-        self,
-        id_node: str,
-    ) -> None:
-        """Updates last seen timestamp."""
-        self._last_seen[id_node] = time.monotonic()
-
-        log.debug(
-            f"KeepAlive: heartbeat from {id_node}"
-        )
-
-    async def run(self) -> None:
-        """Main heartbeat loop."""
-        log.info(
-            f"[{self.node_id}] "
-            f"KeepAliveManager started"
-        )
-
-        while True:
-            await asyncio.sleep(self.interval_s)
-
-            await self._send_heartbeats()
-
-            self._check_timeouts()
-
-    async def _send_heartbeats(self) -> None:
-        msg = KeepAlive(
-            id_node=self.node_id
-        ).to_dict()
-
-        tasks = [
-            send_once(
-                ip,
-                port,
-                msg,
-                expect_reply=False,
-                timeout=3.0,
-            )
-            for _, (ip, port) in self._peers.items()
-        ]
-
-        if tasks:
-            await asyncio.gather(
-                *tasks,
-                return_exceptions=True,
-            )
-
-    def _check_timeouts(self) -> None:
-        now = time.monotonic()
-
-        dead_nodes = [
-            nid
-            for nid, last in self._last_seen.items()
-            if (now - last) > self.timeout_s
-        ]
-
-        for nid in dead_nodes:
-            log.warning(
-                f"[{self.node_id}] "
-                f"Node {nid} timed out"
-            )
-
-            self.remove_peer(nid)
-
-            self.on_node_down(nid)
+            except Exception:
+                pass

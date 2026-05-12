@@ -1,20 +1,5 @@
 """
-pubsub.py - Simple Publish/Subscribe system.
-
-Main topic:
-    global_best_score
-
-Nodes can:
-    - subscribe to topics
-    - publish messages
-    - receive notifications from the broker
-
-Maekawa integration:
-    Mutual exclusion must happen BEFORE publishing.
-    PubSub only distributes the update.
-
-Lamport integration:
-    Publish messages carry a lamport_clock value.
+pubsub.py - Sistema Publish/Subscribe do Hyperparalelizer.
 """
 
 import asyncio
@@ -25,52 +10,124 @@ from utils.protocol import (
     MSG_PUBSUB_NOTIFY,
     MSG_PUBSUB_PUBLISH,
     MSG_PUBSUB_SUBSCRIBE,
+    MSG_PUBSUB_UNSUBSCRIBE,
     Ack,
     PubSubNotify,
     PubSubPublish,
     PubSubSubscribe,
+    PubSubUnsubscribe,
 )
 from core.network import send_message, send_once
 
 log = get_logger("pubsub")
 
-# Local callback type
+# Callback: callback(topic, payload, lamport_clock)
 NotifyCallback = Callable[[str, Dict[str, Any], int], Awaitable[None]]
 
 
-# ── Broker ────────────────────────────────────────────────────────────────
+# Tópicos
+
+TOPIC_GLOBAL_BEST_SCORE = "global_best_score"
+
+"""
+Payload esperado:
+{
+    "task_id":   str,
+    "id_node":   str,
+    "f1_score":  float,
+    "accuracy":  float,
+    "precision": float,
+    "recall":    float,
+    "roc_auc":   float,
+}
+"""
+
+
+# Broker
+
 
 class PubSubBroker:
-    """Central Pub/Sub broker."""
+    """Broker Pub/Sub."""
 
     def __init__(self, node_id: str):
         self.node_id = node_id
 
-        # topic -> set(id_node, ip, port)
+        # topic -> set(id_node, ip, listen_port)
         self._subscriptions: Dict[str, Set[tuple]] = {}
+
+    # Handlers
 
     async def handle_subscribe(
         self,
         msg: Dict[str, Any],
         writer: asyncio.StreamWriter,
     ) -> None:
-        """Handles subscriptions."""
+        """Processa subscribe."""
         topic = msg.get("topic", "")
         id_node = msg.get("id_node", "")
 
         peer = writer.get_extra_info("peername")
         ip = peer[0] if peer else "unknown"
-        porta = peer[1] if peer else 0
+
+        listen_port = msg.get("listen_port")
+
+        if not listen_port:
+            log.warning(
+                f"Broker: subscribe from {id_node} without listen_port"
+            )
+            return
 
         if topic not in self._subscriptions:
             self._subscriptions[topic] = set()
 
-        self._subscriptions[topic].add((id_node, ip, porta))
+        self._subscriptions[topic].add((id_node, ip, listen_port))
 
-        log.info(f"Broker: {id_node} subscribed to '{topic}'")
+        log.info(
+            f"Broker: {id_node[:8]}… subscribed to '{topic}' "
+            f"({ip}:{listen_port})"
+        )
 
         ack = Ack(
             ref_type=MSG_PUBSUB_SUBSCRIBE,
+            ref_id=id_node,
+        ).to_dict()
+
+        await send_message(writer, ack)
+
+    async def handle_unsubscribe(
+        self,
+        msg: Dict[str, Any],
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Processa unsubscribe."""
+        topic = msg.get("topic", "")
+        id_node = msg.get("id_node", "")
+
+        if topic == "*":
+            self.remove_subscriber(id_node)
+
+            log.info(
+                f"Broker: {id_node[:8]}… unsubscribed from all topics"
+            )
+
+        elif topic in self._subscriptions:
+            self._subscriptions[topic] = {
+                s for s in self._subscriptions[topic]
+                if s[0] != id_node
+            }
+
+            log.info(
+                f"Broker: {id_node[:8]}… unsubscribed from '{topic}'"
+            )
+
+        else:
+            log.debug(
+                f"Broker: unsubscribe from unknown topic "
+                f"'{topic}' by {id_node[:8]}…"
+            )
+
+        ack = Ack(
+            ref_type=MSG_PUBSUB_UNSUBSCRIBE,
             ref_id=id_node,
         ).to_dict()
 
@@ -81,17 +138,17 @@ class PubSubBroker:
         msg: Dict[str, Any],
         writer: asyncio.StreamWriter,
     ) -> None:
-        """Handles publish events."""
+        """Processa publish."""
         topic = msg.get("topic", "")
         payload = msg.get("payload", {})
         lamport = msg.get("lamport_clock", 0)
         id_node = msg.get("id_node", "")
 
         log.info(
-            f"Broker: publish on '{topic}' by {id_node} (L={lamport})"
+            f"Broker: publish on '{topic}' by "
+            f"{id_node[:8]}… (L={lamport})"
         )
 
-        # Confirm reception first
         ack = Ack(
             ref_type=MSG_PUBSUB_PUBLISH,
             ref_id=id_node,
@@ -102,7 +159,9 @@ class PubSubBroker:
         subscribers = self._subscriptions.get(topic, set())
 
         if not subscribers:
-            log.debug(f"Broker: no subscribers for '{topic}'")
+            log.debug(
+                f"Broker: no subscribers for '{topic}'"
+            )
             return
 
         notify = PubSubNotify(
@@ -111,16 +170,21 @@ class PubSubBroker:
             lamport_clock=lamport,
         ).to_dict()
 
+        targets = [
+            (nid, ip, port)
+            for (nid, ip, port) in subscribers
+            if nid != id_node
+        ]
+
         tasks = [
             send_once(
                 ip,
-                porta,
+                port,
                 notify,
                 expect_reply=False,
                 timeout=5.0,
             )
-            for (nid, ip, porta) in subscribers
-            if nid != id_node
+            for (nid, ip, port) in targets
         ]
 
         results = await asyncio.gather(
@@ -128,59 +192,107 @@ class PubSubBroker:
             return_exceptions=True,
         )
 
-        # Remove dead subscribers
-        dead = []
+        dead: List[tuple] = []
 
-        sub_list = [
-            s for s in subscribers
-            if s[0] != id_node
-        ]
-
-        for sub, result in zip(sub_list, results):
+        for sub, result in zip(targets, results):
             if isinstance(result, Exception):
                 log.warning(
-                    f"Broker: failed notifying {sub[0]}, removing"
+                    f"Broker: failed to notify "
+                    f"{sub[0][:8]}…, removing"
                 )
+
                 dead.append(sub)
 
         for sub in dead:
             self._subscriptions[topic].discard(sub)
 
+    # Utilitários
+
     def get_subscribers(self, topic: str) -> List[tuple]:
-        """Returns subscribers for a topic."""
+        """Retorna subscribers."""
         return list(self._subscriptions.get(topic, set()))
 
+    def remove_subscriber(self, node_id: str) -> None:
+        """Remove um nó de todos os tópicos."""
+        for topic in self._subscriptions:
+            self._subscriptions[topic] = {
+                s for s in self._subscriptions[topic]
+                if s[0] != node_id
+            }
 
-# ── Client ────────────────────────────────────────────────────────────────
+        log.info(
+            f"Broker: {node_id[:8]}… removed from all topics"
+        )
+
+
+# Cliente
+
 
 class PubSubClient:
-    """Pub/Sub client."""
+    """Cliente Pub/Sub."""
 
     def __init__(
         self,
         node_id: str,
         broker_ip: str,
         broker_port: int,
+        listen_port: int,
     ):
         self.node_id = node_id
         self.broker_ip = broker_ip
         self.broker_port = broker_port
+        self.listen_port = listen_port
 
         # topic -> callbacks
         self._callbacks: Dict[str, List[NotifyCallback]] = {}
+
+    # API
 
     async def subscribe(
         self,
         topic: str,
         callback: NotifyCallback,
     ) -> bool:
-        """Subscribes to a topic."""
+        """Inscreve o nó em um tópico."""
         if topic not in self._callbacks:
             self._callbacks[topic] = []
 
         self._callbacks[topic].append(callback)
 
         msg = PubSubSubscribe(
+            id_node=self.node_id,
+            topic=topic,
+            listen_port=self.listen_port,
+        ).to_dict()
+
+        reply = await send_once(
+            self.broker_ip,
+            self.broker_port,
+            msg,
+            expect_reply=True,
+            timeout=5.0,
+        )
+
+        ok = reply is not None and reply.get("type") == "Ack"
+
+        if ok:
+            log.info(
+                f"[{self.node_id[:8]}…] subscribed to '{topic}'"
+            )
+
+        else:
+            log.warning(
+                f"[{self.node_id[:8]}…] subscribe failed "
+                f"for '{topic}'"
+            )
+
+        return ok
+
+    async def unsubscribe(self, topic: str) -> bool:
+        """Remove inscrição de um tópico."""
+        self._callbacks.pop(topic, None)
+
+        msg = PubSubUnsubscribe(
             id_node=self.node_id,
             topic=topic,
         ).to_dict()
@@ -193,15 +305,49 @@ class PubSubClient:
             timeout=5.0,
         )
 
-        ok = (
-            reply is not None
-            and reply.get("type") == "Ack"
-        )
+        ok = reply is not None and reply.get("type") == "Ack"
 
         if ok:
-            log.info(f"[{self.node_id}] subscribed to '{topic}'")
+            log.info(
+                f"[{self.node_id[:8]}…] unsubscribed from '{topic}'"
+            )
+
         else:
-            log.warning(f"[{self.node_id}] subscribe failed")
+            log.warning(
+                f"[{self.node_id[:8]}…] unsubscribe failed "
+                f"for '{topic}'"
+            )
+
+        return ok
+
+    async def unsubscribe_all(self) -> bool:
+        """Remove inscrição de todos os tópicos."""
+        self._callbacks.clear()
+
+        msg = PubSubUnsubscribe(
+            id_node=self.node_id,
+            topic="*",
+        ).to_dict()
+
+        reply = await send_once(
+            self.broker_ip,
+            self.broker_port,
+            msg,
+            expect_reply=True,
+            timeout=5.0,
+        )
+
+        ok = reply is not None and reply.get("type") == "Ack"
+
+        if ok:
+            log.info(
+                f"[{self.node_id[:8]}…] unsubscribed from all topics"
+            )
+
+        else:
+            log.warning(
+                f"[{self.node_id[:8]}…] unsubscribe_all failed"
+            )
 
         return ok
 
@@ -211,7 +357,7 @@ class PubSubClient:
         payload: Dict[str, Any],
         lamport: int = 0,
     ) -> bool:
-        """Publishes a message."""
+        """Publica em um tópico."""
         msg = PubSubPublish(
             id_node=self.node_id,
             topic=topic,
@@ -227,40 +373,40 @@ class PubSubClient:
             timeout=5.0,
         )
 
-        ok = (
-            reply is not None
-            and reply.get("type") == "Ack"
-        )
+        ok = reply is not None and reply.get("type") == "Ack"
 
         if ok:
             log.info(
-                f"[{self.node_id}] published to '{topic}' (L={lamport})"
+                f"[{self.node_id[:8]}…] published to "
+                f"'{topic}' (L={lamport})"
             )
+
         else:
             log.warning(
-                f"[{self.node_id}] publish failed"
+                f"[{self.node_id[:8]}…] publish failed "
+                f"for '{topic}'"
             )
 
         return ok
+
+    # Handler
 
     async def handle_notify(
         self,
         msg: Dict[str, Any],
         writer: asyncio.StreamWriter,
     ) -> None:
-        """Handles incoming notifications."""
+        """Processa notificações."""
         topic = msg.get("topic", "")
         payload = msg.get("payload", {})
         lamport = msg.get("lamport_clock", 0)
 
         log.debug(
-            f"[{self.node_id}] notify '{topic}' "
-            f"(L={lamport}): {payload}"
+            f"[{self.node_id[:8]}…] notified on "
+            f"'{topic}' (L={lamport}): {payload}"
         )
 
-        callbacks = self._callbacks.get(topic, [])
-
-        for cb in callbacks:
+        for cb in self._callbacks.get(topic, []):
             try:
                 await cb(topic, payload, lamport)
 
@@ -268,22 +414,3 @@ class PubSubClient:
                 log.error(
                     f"Callback error for '{topic}': {exc}"
                 )
-
-
-# ── Default topics ────────────────────────────────────────────────────────
-
-TOPIC_GLOBAL_BEST_SCORE = "global_best_score"
-
-"""
-Expected payload:
-
-{
-    "task_id": str,
-    "id_node": str,
-    "f1_score": float,
-    "accuracy": float,
-    "precision": float,
-    "recall": float,
-    "roc_auc": float,
-}
-"""

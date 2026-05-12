@@ -1,5 +1,5 @@
 """
-serializer.py – Empacotamento/desempacotamento de mensagens para transporte TCP.
+serializer.py - Empacotamento/desempacotamento de mensagens para transporte TCP.
 
 Formato de frame (length-prefixed):
   [4 bytes big-endian uint32 = tamanho do payload JSON] [payload JSON em UTF-8]
@@ -38,7 +38,7 @@ def decode_body(raw_body: bytes) -> Dict[str, Any]:
     return _from_json_safe(data)
 
 
-# ── helpers ────────────────────────────────────────────────────────────────
+# helpers ─
 
 def _to_json_safe(obj: Any) -> Any:
     """Troca bytes por base64."""

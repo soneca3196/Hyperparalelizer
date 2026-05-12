@@ -1,5 +1,5 @@
 """
-protocol.py – Contratos de mensagens do sistema Hyperparalelizer.
+protocol.py - Contratos de mensagens do sistema Hyperparalelizer.
 """
 
 from dataclasses import asdict, dataclass, field
@@ -114,6 +114,7 @@ class SendBestModel:
 class PubSubSubscribe:
     id_node: str
     topic: str
+    listen_port: int  # porta do nó para receber notificações
 
     type: str = field(default=MSG_PUBSUB_SUBSCRIBE, init=False)
 
