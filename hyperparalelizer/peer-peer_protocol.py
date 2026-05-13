@@ -1,0 +1,1 @@
+# mensagens externas entre redes peer2peer (aquelas definidas no docs)
