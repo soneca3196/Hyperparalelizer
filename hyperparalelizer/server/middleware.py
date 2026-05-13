@@ -10,6 +10,7 @@
 from enum import Enum
 from dataclasses import dataclass
 
+# tarefas_para_processar = queue.Queue()
 
 @dataclass
 class Peer:
@@ -42,13 +43,9 @@ class Coordinator:
     
     # ENDPOINT: ADICIONA NOVO PEER
     def add_peer(self, peer):
-        # Verifica se há novos peers na rede e atualiza a lista de peers
-        # Keep-alive ou heartbeat para monitorar peers ativos
-        #consultar a DHT
-
-        # se encontrou peer novo
-            # chama função de assign fragmento dataset
-            # chama função de assign hyperparametros
+        # atualizar a DHT com metadados
+            # assign fragmento dataset
+            # assign hyperparametros
         self.assign_hyperparameters_to_peer(peer)
 
         pass
