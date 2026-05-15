@@ -1,9 +1,15 @@
 """
 pubsub.py - Sistema Publish/Subscribe do Hyperparalelizer.
+
+Comunicação com o Middleware via duas filas thread-safe (queue.Queue):
+    inbound_queue  (Queue): PubSubClient → Middleware
+    outbound_queue (Queue): Middleware → PubSubClient
 """
 
 import asyncio
-from typing import Any, Awaitable, Callable, Dict, List, Set
+import queue
+import threading
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from utils.logger import get_logger
 from utils.protocol import (
@@ -229,7 +235,11 @@ class PubSubBroker:
 
 
 class PubSubClient:
-    """Cliente Pub/Sub."""
+    """Cliente Pub/Sub
+    - inbound_queue  (Queue): notificações recebidas → Middleware
+    - outbound_queue (Queue): pedidos de publish do Middleware → rede
+
+    """
 
     def __init__(
         self,
@@ -237,27 +247,123 @@ class PubSubClient:
         broker_ip: str,
         broker_port: int,
         listen_port: int,
+        inbound_queue: Optional[queue.Queue] = None,
+        outbound_queue: Optional[queue.Queue] = None,
     ):
         self.node_id = node_id
         self.broker_ip = broker_ip
         self.broker_port = broker_port
         self.listen_port = listen_port
 
-        # topic -> callbacks
+        # topic -> callbacks (usados quando não há inbound_queue)
         self._callbacks: Dict[str, List[NotifyCallback]] = {}
 
-    # API
+        # Filas compartilhadas com o Middleware
+        self._inbound_queue: Optional[queue.Queue] = inbound_queue
+        self._outbound_queue: Optional[queue.Queue] = outbound_queue
+
+        self._outbound_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+
+    # Gestão das filas
+
+    def attach_queues(
+        self,
+        inbound_queue: queue.Queue,
+        outbound_queue: queue.Queue,
+    ) -> None:
+        """Associa as filas compartilhadas com o Middleware
+        """
+        self._inbound_queue = inbound_queue
+        self._outbound_queue = outbound_queue
+        log.debug("PubSubClient: filas do Middleware associadas")
+
+    def start_outbound_listener(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Inicia a thread que consome a outbound_queue e envia publishes
+        """
+        if self._outbound_queue is None:
+            log.warning(
+                "PubSubClient: start_outbound_listener chamado "
+                "sem outbound_queue configurada"
+            )
+            return
+
+        def _worker() -> None:
+            log.info("PubSubClient: outbound listener thread iniciada")
+
+            while not self._stop_event.is_set():
+                try:
+                    item = self._outbound_queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+
+                topic = item.get("topic", "")
+                payload = item.get("payload", {})
+                lamport = item.get("lamport", 0)
+
+                if not topic:
+                    log.warning(
+                        "PubSubClient: item na outbound_queue "
+                        "sem 'topic', ignorando"
+                    )
+                    self._outbound_queue.task_done()
+                    continue
+
+                future = asyncio.run_coroutine_threadsafe(
+                    self.publish(topic, payload, lamport),
+                    loop,
+                )
+
+                try:
+                    ok = future.result(timeout=10.0)
+                    if not ok:
+                        log.warning(
+                            f"PubSubClient: publish em '{topic}' "
+                            f"retornou False"
+                        )
+                except Exception as exc:
+                    log.error(
+                        f"PubSubClient: erro ao publicar em "
+                        f"'{topic}' — {exc}"
+                    )
+                finally:
+                    self._outbound_queue.task_done()
+
+            log.info("PubSubClient: outbound listener thread encerrada")
+
+        self._stop_event.clear()
+        self._outbound_thread = threading.Thread(
+            target=_worker,
+            name="pubsub-outbound",
+            daemon=True,
+        )
+        self._outbound_thread.start()
+
+    def stop_outbound_listener(self) -> None:
+        """Sinaliza parada da thread outbound"""
+        self._stop_event.set()
+        if self._outbound_thread and self._outbound_thread.is_alive():
+            self._outbound_thread.join(timeout=5.0)
+
+    # API (asyncio)
 
     async def subscribe(
         self,
         topic: str,
-        callback: NotifyCallback,
+        callback: Optional[NotifyCallback] = None,
     ) -> bool:
-        """Inscreve o nó em um tópico."""
-        if topic not in self._callbacks:
-            self._callbacks[topic] = []
+        """Inscreve o nó em um tópico.
+        """
+        if self._inbound_queue is None and callback is None:
+            raise ValueError(
+                "subscribe requer callback quando não há "
+                "inbound_queue configurada"
+            )
 
-        self._callbacks[topic].append(callback)
+        if callback is not None:
+            if topic not in self._callbacks:
+                self._callbacks[topic] = []
+            self._callbacks[topic].append(callback)
 
         msg = PubSubSubscribe(
             id_node=self.node_id,
@@ -279,7 +385,6 @@ class PubSubClient:
             log.info(
                 f"[{self.node_id[:8]}…] subscribed to '{topic}'"
             )
-
         else:
             log.warning(
                 f"[{self.node_id[:8]}…] subscribe failed "
@@ -311,7 +416,6 @@ class PubSubClient:
             log.info(
                 f"[{self.node_id[:8]}…] unsubscribed from '{topic}'"
             )
-
         else:
             log.warning(
                 f"[{self.node_id[:8]}…] unsubscribe failed "
@@ -343,7 +447,6 @@ class PubSubClient:
             log.info(
                 f"[{self.node_id[:8]}…] unsubscribed from all topics"
             )
-
         else:
             log.warning(
                 f"[{self.node_id[:8]}…] unsubscribe_all failed"
@@ -380,7 +483,6 @@ class PubSubClient:
                 f"[{self.node_id[:8]}…] published to "
                 f"'{topic}' (L={lamport})"
             )
-
         else:
             log.warning(
                 f"[{self.node_id[:8]}…] publish failed "
@@ -396,7 +498,11 @@ class PubSubClient:
         msg: Dict[str, Any],
         writer: asyncio.StreamWriter,
     ) -> None:
-        """Processa notificações."""
+        """Processa notificações recebidas do broker.
+
+        1. Se houver inbound_queue, coloca o evento nela para o Middleware.
+        2. Também dispara callbacks locais registrados (se houver).
+        """
         topic = msg.get("topic", "")
         payload = msg.get("payload", {})
         lamport = msg.get("lamport_clock", 0)
@@ -406,10 +512,24 @@ class PubSubClient:
             f"'{topic}' (L={lamport}): {payload}"
         )
 
+        # 1. Entrega para o Middleware via inbound_queue
+        if self._inbound_queue is not None:
+            evento = {
+                "tipo":    topic,
+                "peer_id": payload.get("id_node", ""),
+                "dados":   payload,
+                "lamport": lamport,
+            }
+            self._inbound_queue.put(evento)
+            log.debug(
+                f"[{self.node_id[:8]}…] evento '{topic}' "
+                f"colocado na inbound_queue"
+            )
+
+        # 2. Callbacks locais (retrocompatível)
         for cb in self._callbacks.get(topic, []):
             try:
                 await cb(topic, payload, lamport)
-
             except Exception as exc:
                 log.error(
                     f"Callback error for '{topic}': {exc}"
