@@ -6,6 +6,30 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+"""
+Calcula métricas de classificação comparando rótulos reais com os preditos.
+
+Detecta automaticamente se o problema é binário ou multiclasse e ajusta
+as estratégias de agregação (average) de cada métrica de acordo.
+
+Args:
+    true: Rótulos verdadeiros (array-like de inteiros ou strings).
+    pred: Rótulos preditos pelo modelo (mesmo formato de `true`).
+    prob: Probabilidades de classe retornadas por predict_proba (opcional).
+            - Classificação binária: array 1-D com a prob. da classe positiva.
+            - Classificação multiclasse: matriz 2-D (n_amostras × n_classes).
+            Se None, a métrica ROC-AUC não será calculada.
+
+Returns:
+    Dicionário com as seguintes métricas:
+        - 'accuracy'  : proporção de predições corretas.
+        - 'precision' : precisão média (binary ou macro).
+        - 'recall'    : recall médio (binary ou macro).
+        - 'f1'        : F1-score médio (binary ou macro).
+        - 'roc_auc'   : área sob a curva ROC; None se `prob` não for fornecido
+                        ou se o cálculo falhar (e.g., apenas uma classe presente).
+"""
+
 def evaluate(true, pred, prob=None) -> dict:
     import numpy as np
 
