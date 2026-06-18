@@ -9,38 +9,51 @@
 
 from enum import Enum
 from dataclasses import dataclass
-
-# tarefas_para_processar = queue.Queue()
-
-@dataclass
-class Peer:
-    id_node: int
-    hyperparameters: dict
-    metrics: dict
-    received_dataset: bool = False
-    received_model: bool = False
-
-class State(Enum):
-    HASHING = 0 # apos iniciar com o dataset, para distribuir
-    DATASET_DISTRIBUTION = 1 # apos dar Hash, para distribuir dataset
-    MODEL_DISTRIBUTION = 2 # Apos separar modelos e hiperparametros, para distribuir
-    MODEL_COMPARE = 3 # apos receber metricas, para comparar modelos e requisita-lo
-    FINISHED = 4
+import queue
+import pandas as pd
 
 class Coordinator:
-    def __init__(self, dataset, model):
-        # Inicialização do coordenador
-        self.state = State.HASHING
+    def __init__(self, dataset: pd.DataFrame, 
+                 model_type: str, 
+                 msg_in: queue.Queue[dict], 
+                 msg_out: queue.Queue[dict], 
+                 DEBUG=False):
+
+        self.DEBUG = DEBUG  # ativa prints para debugar
+
         self.dataset = dataset
-        self.model = model
+        self.model_type = model_type
 
         self.peers = []
-
         self.task_pool = []  # Fila de tarefas para os peers
 
         self.best_model = None
-        pass
+
+        # Queues de Mensageria entre server_messenger/pubsub
+        self.msg_in = msg_in
+        self.msg_out = msg_out
     
+        
+    def listen_for_queue(self):
+        msg = self.msg_in.get() # RECEBE MENSAGEM DO PUBSUB
+        if self.DEBUG: print("msg_in: " + msg)
+
+        # TRATAMENTO DAS MENSAGENS (TO DO)
+            # JoinNetwork (novo peer):
+                # registra, envia endereços do dataset e primeira task
+        
+            # TaskResult (resultado de treinamento):
+                # salva resultado daquela combinação de hiperparametros em tabela
+                # compara e atualiza best_model
+
+        queue.done()
+
+        # caso der ruim em um peer (timeout), volta a tarefa de treinamento para a pool
+        pass
+
+    def send_to_queue(self):
+        pass
+
     # ENDPOINT: ADICIONA NOVO PEER
     def add_peer(self, peer):
         # atualizar a DHT com metadados
@@ -61,15 +74,11 @@ class Coordinator:
         pass
 
     def fragment_dataset(self):
-        # Fragmenta o dataset para distribuição entre os peers
-        # chama DHT
+        # Fragmenta o dataset conforme o tamanho
+
         pass
 
-    def check_task_status(self):
-        # VAI PRO MESSENGER
-        # Verifica o status das tarefas enviadas
-        # caso der ruim em um peer (timeout), volta a tarefa para a pool
-        pass
+
 
     def distribute_dataset(self):
         pass
