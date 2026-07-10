@@ -2,6 +2,7 @@
 
 import asyncio
 import pickle
+import threading
 from typing import Any, Dict, List, Optional
 
 from sklearn.model_selection import train_test_split
@@ -21,7 +22,7 @@ log = get_logger("trainer")
 
 
 class TrainerNode:
-    def __init__(self, node_id, messenger, data_thread, dataset_loader, event_bus: Optional[InternalEventBus] = None):
+    def __init__(self, node_id, messenger, data_thread, dataset_loader, maekawa_mutex, event_bus: Optional[InternalEventBus] = None):
         """
         event_bus: opcional, publica o ciclo de vida do treino (TrainingStarted, TrainingFinished, TrainingFailed)
         """
@@ -29,10 +30,16 @@ class TrainerNode:
         self.messenger = messenger
         self.data_thread = data_thread
         self.dataset_loader = dataset_loader
+        self.maekawa_mutex = maekawa_mutex
         self.event_bus = event_bus
 
         self.best_model = None
         self.best_score = -1.0
+        
+        # Variáveis de Backup (Peer Pupilo)
+        self.replica_dht = {}
+        self.replica_queue = []
+        self.replica_best_model = {}
 
     # Receber task
 
@@ -55,15 +62,24 @@ class TrainerNode:
         # treino bloqueante roda em thread separada, sem travar o event loop
         self._emit(TrainingStarted(task_id=task_id, node_id=self.node_id, fragment_ids=fragment_ids))
         loop = asyncio.get_running_loop()
+        
         try:
-            metrics = await loop.run_in_executor(None, self._train_task, task, fragment_ids)
+            # Retorna as métricas e um booleano dizendo se quebrou o recorde
+            metrics, is_new_best = await loop.run_in_executor(None, self._train_task, task, fragment_ids)
         except Exception as exc:
             log.error(f"[Trainer {self.node_id[:8]}...] erro durante treino: {exc}")
             self._send_result(task, metrics=None, error=str(exc))
             self._emit(TrainingFailed(task_id=task_id, node_id=self.node_id, error=str(exc)))
             return
 
-        self._send_result(task, metrics=metrics)
+        # LOGICA DO MAEKAWA: Protege o envio se for um novo melhor modelo
+        if is_new_best:
+            await self.maekawa_mutex.request_access()
+            self._send_result(task, metrics=metrics)
+            await self.maekawa_mutex.release_access()
+        else:
+            self._send_result(task, metrics=metrics)
+
         self._emit(TrainingFinished(task_id=task_id, node_id=self.node_id, metrics=metrics or {}))
 
     def _emit(self, event) -> None:
@@ -76,7 +92,7 @@ class TrainerNode:
 
     # Treinamento (síncrono)
 
-    def _train_task(self, task: Dict[str, Any], fragment_ids: List[str]) -> Dict[str, Any]:
+    def _train_task(self, task: Dict[str, Any], fragment_ids: List[str]) -> tuple:
         print(f"[Trainer {self.node_id}] Iniciando treinamento..")
 
         X, y = self.dataset_loader.load(fragment_ids)
@@ -95,9 +111,12 @@ class TrainerNode:
         print(f"[Trainer {self.node_id}] Métricas: {metrics}")
 
         score = metrics["f1"]  # pode ser trocado para ROC AUC
+        is_new_best = False
+        
         if score > self.best_score:
             self.best_score = score
             self.best_model = model
+            is_new_best = True
             print(f"[Trainer {self.node_id}] Novo melhor modelo!")
             self._emit(
                 BestModelUpdatedLocally(
@@ -105,7 +124,7 @@ class TrainerNode:
                 )
             )
 
-        return metrics
+        return metrics, is_new_best
 
     # Enviar resultado
 
@@ -145,4 +164,19 @@ class TrainerNode:
             "model_bytes": serialized_model,
             "metricas": {"f1": self.best_score},
         }
+
         self.messenger.send(message)
+
+    # Replicação e Bully (Pupilo)
+
+    def handle_sync_state(self, msg: dict):
+        # Guarda o backup passivamente
+        self.replica_dht = msg.get("dht_snapshot", {})
+        self.replica_queue = msg.get("task_queue_snapshot", [])
+        self.replica_best_model = msg.get("best_model_metrics", {})
+        print(f"[Pupilo {self.node_id}] Estado de backup atualizado.")
+
+    def promote_to_server(self):
+        # Invocado pelo Bully._announce_victory()
+        print(f"[Pupilo {self.node_id}] Fui promovido! Assumindo estado do Coordenador...")
+        # Depois Instancia o Coordinator do middleware.py e passa os estados salvos (self.replica_dht, etc) para ele.

@@ -3,6 +3,7 @@
 # servidor com ESTADOS
 # armazenar informações do estado da rede, o histórico de requisições e monitorar o desempenho dos modelos recebidos.
 
+import asyncio
 import itertools
 import math
 import queue
@@ -13,12 +14,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from core.network import send_once
 from core.pubsub import TOPIC_GLOBAL_BEST_SCORE
 from hyperparalelizer.server.dht_global import DHT
 from utils.protocol import PubSubPublish, TrainingTask
 
 TASK_TIMEOUT = 30.0  # segundos até uma tarefa ser considerada perdida
-
 
 @dataclass
 class Peer:
@@ -64,6 +65,9 @@ class Coordinator:
         self.best_model: Optional[Dict[str, Any]] = None
         self._pubsub_queue = pubsub_queue  # fila Middleware → PubSubClient
         self._lock = threading.Lock()
+        
+        # Referência ao peer pupilo (se existir)
+        self.pupil_peer: Optional[Dict[str, Any]] = None
 
     # ENDPOINT: ADICIONA NOVO PEER                                      
     def add_peer(self, peer: Peer) -> str:
@@ -272,3 +276,18 @@ class Coordinator:
             self._pubsub_queue.put_nowait(publish_msg.to_dict())
 
         return peer, task
+
+    def replicate_state_to_pupil(self):
+        # Envia estado para o Peer Pupilo a cada mudança 
+        if not getattr(self, 'pupil_peer', None):
+            return # Ainda não há pupilo definido
+            
+        msg = {
+            "type": "SyncState",
+            "id_node": "server",
+            "dht_snapshot": self.dht.nodes, 
+            "task_queue_snapshot": self.task_pool,
+            "best_model_metrics": self.best_model
+        }
+        
+        asyncio.create_task(send_once(self.pupil_peer['ip'], self.pupil_peer['port'], msg, expect_reply=False))

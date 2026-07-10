@@ -1,10 +1,10 @@
 """
 protocol.py - Contratos de mensagens do sistema Hyperparalelizer.
 """
-
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 import time
+
 
 # Tipo de mensagem
 MSG_JOIN_NETWORK = "JoinNetwork"
@@ -20,6 +20,13 @@ MSG_PUBSUB_PUBLISH = "PubSubPublish"
 MSG_PUBSUB_NOTIFY = "PubSubNotify"
 MSG_ACK = "Ack"
 MSG_ERROR = "Error"
+MSG_MAEKAWA_REQUEST = "MaekawaRequest"
+MSG_MAEKAWA_GRANT = "MaekawaGrant"
+MSG_MAEKAWA_RELEASE = "MaekawaRelease"
+MSG_BULLY_ELECTION = "BullyElection"
+MSG_BULLY_ALIVE = "BullyAlive"
+MSG_BULLY_COORDINATOR = "BullyCoordinator"
+MSG_SYNC_STATE = "SyncState"
 
 
 @dataclass
@@ -181,6 +188,71 @@ class ErrorMsg:
         return asdict(self)
 
 
+def from_dict(data: Dict[str, Any]):
+    """Builds a message object from dict data."""
+    msg_type = data.get("type")
+    cls = _TYPE_MAP.get(msg_type)
+
+    if cls is None:
+        raise ValueError(f"Unknown message type: {msg_type!r}")
+
+    kwargs = {k: v for k, v in data.items() if k != "type"}
+    return cls(**kwargs)
+
+
+@dataclass
+class MaekawaRequest:
+    id_node: str
+    timestamp: int
+    type: str = field(default=MSG_MAEKAWA_REQUEST, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class MaekawaGrant:
+    id_node: str
+    type: str = field(default=MSG_MAEKAWA_GRANT, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class MaekawaRelease:
+    id_node: str
+    type: str = field(default=MSG_MAEKAWA_RELEASE, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class SyncState:
+    id_node: str # id do servidor
+    dht_snapshot: dict
+    task_queue_snapshot: list
+    best_model_metrics: dict
+    type: str = field(default=MSG_SYNC_STATE, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class BullyElectionMsg:
+    id_node: str
+    type: str = field(default=MSG_BULLY_ELECTION, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class BullyAliveMsg:
+    id_node: str
+    type: str = field(default=MSG_BULLY_ALIVE, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class BullyCoordinatorMsg:
+    id_node: str
+    type: str = field(default=MSG_BULLY_COORDINATOR, init=False)
+    def to_dict(self): return asdict(self)
+
+
 # Mapeamento de tipo para as mensagens
 _TYPE_MAP = {
     MSG_JOIN_NETWORK: JoinNetwork,
@@ -195,16 +267,13 @@ _TYPE_MAP = {
     MSG_PUBSUB_PUBLISH: PubSubPublish,
     MSG_ACK: Ack,
     MSG_ERROR: ErrorMsg,
+    MSG_MAEKAWA_REQUEST: MaekawaRequest,
+    MSG_MAEKAWA_GRANT: MaekawaGrant,
+    MSG_MAEKAWA_RELEASE: MaekawaRelease,
+    MSG_BULLY_ELECTION: BullyElectionMsg, 
+    MSG_BULLY_ALIVE: BullyAliveMsg,
+    MSG_BULLY_COORDINATOR: BullyCoordinatorMsg,
+    MSG_SYNC_STATE: SyncState,
 }
 
 
-def from_dict(data: Dict[str, Any]):
-    """Builds a message object from dict data."""
-    msg_type = data.get("type")
-    cls = _TYPE_MAP.get(msg_type)
-
-    if cls is None:
-        raise ValueError(f"Unknown message type: {msg_type!r}")
-
-    kwargs = {k: v for k, v in data.items() if k != "type"}
-    return cls(**kwargs)
