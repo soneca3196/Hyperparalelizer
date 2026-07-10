@@ -1,21 +1,21 @@
 import hashlib
 import threading
 
-class DHT:
+class Global_Table:
     def __init__(self):
         # tabela para mapear: hash(IP+Porta) -> Metadados do Nó
         self.nodes = {}
         # tabela para mapear: hash(Nome do Fragmento) -> lista de IPs/IDs
         self.fragments_dataset = {}
         
-        # garanti que duas threads nao modifiquem a DHT ao mesmo tempo
+        # garanti que duas threads nao modifiquem a Global_Table ao mesmo tempo
         self.lock = threading.Lock()
 
     # gera o hash sha256 dado o ip + porta ou nome do fragmento
     def generate_hash(self, key_string):
         return hashlib.sha256(key_string.encode('utf-8')).hexdigest()
 
-    # adiciona um no a DHT, armazenando seu IP, porta e metadados
+    # adiciona um no a Global_Table, armazenando seu IP, porta e metadados
     def add_node(self, ip, port, metadata):
         node_id = self.generate_hash(f"{ip}:{port}")
         
@@ -68,20 +68,20 @@ class DHT:
             return self.fragments_dataset.get(frag_id, [])
         
 
-# Teste do DHT
+# Teste do Global_Table
 # if __name__ == "__main__":
 #     import time
 
-#     print("--- INICIANDO TESTES DA DHT (HYPERPARALELIZER) ---\n")
+#     print("--- INICIANDO TESTES DA Global_Table (HYPERPARALELIZER) ---\n")
     
-#     # instanciando a DHT
-#     dht = DHT()
+#     # instanciando a Global_Table
+#     Global_Table = Global_Table()
     
 #     # testando a adição de nós
 #     print("Adicionando nós na rede...")
-#     id_barriga = dht.add_node("192.168.0.10", 5000, {"role": "Coordenador (Barriga)", "ram": "16GB"})
-#     id_madruga1 = dht.add_node("192.168.0.11", 5001, {"role": "Treinador (Madruga 1)", "ram": "8GB"})
-#     id_madruga2 = dht.add_node("192.168.0.12", 5001, {"role": "Treinador (Madruga 2)", "ram": "4GB"})
+#     id_barriga = Global_Table.add_node("192.168.0.10", 5000, {"role": "Coordenador (Barriga)", "ram": "16GB"})
+#     id_madruga1 = Global_Table.add_node("192.168.0.11", 5001, {"role": "Treinador (Madruga 1)", "ram": "8GB"})
+#     id_madruga2 = Global_Table.add_node("192.168.0.12", 5001, {"role": "Treinador (Madruga 2)", "ram": "4GB"})
     
 #     print(f" -> ID Barriga: {id_barriga}")
 #     print(f" -> ID Madruga 1: {id_madruga1}")
@@ -89,7 +89,7 @@ class DHT:
 
 #     # listagem de todos os nós ativos
 #     print("Listando todos os nós ativos:")
-#     todos_nos = dht.get_all_nodes()
+#     todos_nos = Global_Table.get_all_nodes()
 #     for no in todos_nos:
 #         print(f" -> IP: {no['ip']} | Role: {no['metadata']['role']}")
 #     print("")
@@ -97,27 +97,27 @@ class DHT:
 #     # mapeamento de fragmentos do dataset
 #     print("Distribuindo fragmentos do dataset...")
 #     # 1 pega o fragmento 1 e 2
-#     dht.add_fragment_location("frag_treino_01.csv", id_madruga1)
-#     dht.add_fragment_location("frag_treino_02.csv", id_madruga1)
+#     Global_Table.add_fragment_location("frag_treino_01.csv", id_madruga1)
+#     Global_Table.add_fragment_location("frag_treino_02.csv", id_madruga1)
     
 #     # 2 pega o fragmento 2 (redundância) e 3
-#     dht.add_fragment_location("frag_treino_02.csv", id_madruga2)
-#     dht.add_fragment_location("frag_treino_03.csv", id_madruga2)
+#     Global_Table.add_fragment_location("frag_treino_02.csv", id_madruga2)
+#     Global_Table.add_fragment_location("frag_treino_03.csv", id_madruga2)
     
 #     # verifica onde está o fragmento 2
-#     locais_frag_2 = dht.get_fragment_locations("frag_treino_02.csv")
+#     locais_frag_2 = Global_Table.get_fragment_locations("frag_treino_02.csv")
 #     print(f" -> O 'frag_treino_02.csv' está salvo nos nós (IDs): {locais_frag_2}\n")
 
 #     # testando a remoção de um nó (caso falha de KeepAlive)
 #     print("Simulando queda do Madruga 1 (KeepAlive falhou)...")
-#     dht.remove_node(id_madruga1)
+#     Global_Table.remove_node(id_madruga1)
     
 #     # verificando se ele sumiu da lista de nós
-#     nos_restantes = dht.get_all_nodes()
+#     nos_restantes = Global_Table.get_all_nodes()
 #     print(f" -> Quantidade de nós ativos agora: {len(nos_restantes)}")
     
-#     # verificando se a DHT limpou os fragmentos que pertenciam a ele
-#     locais_frag_2_atualizado = dht.get_fragment_locations("frag_treino_02.csv")
+#     # verificando se a Global_Table limpou os fragmentos que pertenciam a ele
+#     locais_frag_2_atualizado = Global_Table.get_fragment_locations("frag_treino_02.csv")
 #     print(f" -> O 'frag_treino_02.csv' agora está salvo apenas em: {locais_frag_2_atualizado}")
     
 #     print("\n--- TESTES FINALIZADOS ---")

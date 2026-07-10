@@ -37,7 +37,7 @@ class TrainerNode:
         self.best_score = -1.0
         
         # Variáveis de Backup (Peer Pupilo)
-        self.replica_dht = {}
+        self.replica_Global_Table = {}
         self.replica_queue = []
         self.replica_best_model = {}
 
@@ -171,7 +171,7 @@ class TrainerNode:
 
     def handle_sync_state(self, msg: dict):
         # Guarda o backup passivamente
-        self.replica_dht = msg.get("dht_snapshot", {})
+        self.replica_Global_Table = msg.get("Global_Table_snapshot", {})
         self.replica_queue = msg.get("task_queue_snapshot", [])
         self.replica_best_model = msg.get("best_model_metrics", {})
         print(f"[Pupilo {self.node_id}] Estado de backup atualizado.")
@@ -179,4 +179,4 @@ class TrainerNode:
     def promote_to_server(self):
         # Invocado pelo Bully._announce_victory()
         print(f"[Pupilo {self.node_id}] Fui promovido! Assumindo estado do Coordenador...")
-        # Depois Instancia o Coordinator do middleware.py e passa os estados salvos (self.replica_dht, etc) para ele.
+        # Depois Instancia o Coordinator do middleware.py e passa os estados salvos (self.replica_Global_Table, etc) para ele.

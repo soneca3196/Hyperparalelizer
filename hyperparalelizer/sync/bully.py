@@ -3,9 +3,9 @@ from typing import Dict, Any
 from core.network import send_once
 
 class BullyElection:
-    def __init__(self, my_id: str, dht_peers: Dict[str, Any], promote_callback):
+    def __init__(self, my_id: str, Global_Table_peers: Dict[str, Any], promote_callback):
         self.my_id = my_id
-        self.peers = dht_peers  # Dicionário de peers ativos vindos da réplica da DHT
+        self.peers = Global_Table_peers  # Dicionário de peers ativos vindos da réplica da Global_Table
         self.promote_callback = promote_callback # Função a rodar se este nó vencer
         self.election_in_progress = False
 
