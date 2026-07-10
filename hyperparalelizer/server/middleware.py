@@ -5,6 +5,7 @@
 
 import itertools
 import math
+import queue
 import threading
 import time
 import uuid
@@ -12,8 +13,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from core.pubsub import TOPIC_GLOBAL_BEST_SCORE
 from hyperparalelizer.server.dht_global import DHT
-from utils.protocol import TrainingTask
+from utils.protocol import PubSubPublish, TrainingTask
 
 TASK_TIMEOUT = 30.0  # segundos até uma tarefa ser considerada perdida
 
@@ -40,7 +42,8 @@ class State(Enum):
 class Coordinator:
     def __init__(self, dataset, model, dht: DHT,
                  model_type: str = "generic",
-                 model_config: Optional[Dict[str, Any]] = None):
+                 model_config: Optional[Dict[str, Any]] = None,
+                 pubsub_queue: Optional[queue.Queue] = None):
         self.state = State.HASHING
         self.dataset = dataset
         self.model = model
@@ -57,7 +60,9 @@ class Coordinator:
         self.dataset_fragments: List[str] = []  # nomes dos fragmentos gerados
         self._fragments_data: Dict[str, Any] = {}  # nome -> dados do fragmento
 
-        self.best_model = None
+        # best_model: {"task_id", "peer_id", "hyperparameters", "metrics", "f1_score"}
+        self.best_model: Optional[Dict[str, Any]] = None
+        self._pubsub_queue = pubsub_queue  # fila Middleware → PubSubClient
         self._lock = threading.Lock()
 
     # ENDPOINT: ADICIONA NOVO PEER                                      
@@ -212,30 +217,58 @@ class Coordinator:
 
         return dispatched
     
-    """
-    Recebe o resultado de uma tarefa concluída.
-   
-    Responsabilidades:
-
-    1. Remove a tarefa da lista de execução.
-    2. Libera o peer para novos trabalhos.
-    3. Armazena as métricas retornadas.
-    4. Atualiza o melhor modelo global.
-    """
     def receive_task_result(
         self,
         task_id: str,
-        metrics: Dict[str, Any]
-    ):
+        metrics: Dict[str, Any],
+    ) -> Optional[tuple]:
+        """
+         Quando uma tarefa termina:
+        
+         1. Remove da lista de tarefas em execução.
+         2. Libera o peer para receber novas tarefas.
+         3. Armazena as métricas produzidas.
+         4. Compara com o melhor modelo global atual.
+         5. Caso seja um novo melhor resultado, publica no tópico global_best_score para notificar a rede.
+        """
+        is_new_best = False
+
         with self._lock:
             task_info = self.assigned_tasks.pop(task_id, None)
-
             if task_info is None:
                 return None
 
             peer = task_info["peer"]
             task = task_info["task"]
-
             peer.metrics = metrics
+
+            new_score = float(metrics.get("f1_score", 0.0))
+            current_best = self.best_model["f1_score"] if self.best_model else -1.0
+
+            if new_score > current_best:
+                is_new_best = True
+                self.best_model = {
+                    "task_id": task_id,
+                    "peer_id": peer.id_node,
+                    "hyperparameters": task.parametros,
+                    "metrics": dict(metrics),
+                    "f1_score": new_score,
+                }
+        # encontrou um modelo melhor? publica no tópico global_best_score para notificar a rede
+        if is_new_best and self._pubsub_queue is not None:
+            publish_msg = PubSubPublish(
+                id_node="server",
+                topic=TOPIC_GLOBAL_BEST_SCORE,
+                payload={
+                    "task_id": task_id,
+                    "id_node": peer.id_node,
+                    "f1_score": metrics.get("f1_score", 0.0),
+                    "accuracy": metrics.get("accuracy", 0.0),
+                    "precision": metrics.get("precision", 0.0),
+                    "recall": metrics.get("recall", 0.0),
+                    "roc_auc": metrics.get("roc_auc", 0.0),
+                },
+            )
+            self._pubsub_queue.put_nowait(publish_msg.to_dict())
 
         return peer, task
