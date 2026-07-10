@@ -1,1 +1,0 @@
-# mensagens externas entre redes peer e servidor (aquelas definidas no docs)
