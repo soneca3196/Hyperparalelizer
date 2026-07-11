@@ -18,6 +18,9 @@ from peer.peer_inner_protocol import (
     BestModelUpdatedLocally,
 )
 
+from hyperparalelizer.server.coordinator import Coordinator
+from hyperparalelizer.global_table import GlobalTable
+
 log = get_logger("trainer")
 
 
@@ -37,7 +40,7 @@ class TrainerNode:
         self.best_score = -1.0
         
         # Variáveis de Backup (Peer Pupilo)
-        self.replica_Global_Table = {}
+        self.replica_global_table = {}
         self.replica_queue = []
         self.replica_best_model = {}
 
@@ -171,12 +174,30 @@ class TrainerNode:
 
     def handle_sync_state(self, msg: dict):
         # Guarda o backup passivamente
-        self.replica_Global_Table = msg.get("Global_Table_snapshot", {})
+        self.replica_global_table = msg.get("global_table_snapshot", {})
         self.replica_queue = msg.get("task_queue_snapshot", [])
         self.replica_best_model = msg.get("best_model_metrics", {})
         print(f"[Pupilo {self.node_id}] Estado de backup atualizado.")
 
+
     def promote_to_server(self):
-        # Invocado pelo Bully._announce_victory()
-        print(f"[Pupilo {self.node_id}] Fui promovido! Assumindo estado do Coordenador...")
-        # Depois Instancia o Coordinator do middleware.py e passa os estados salvos (self.replica_Global_Table, etc) para ele.
+        print(f"[Pupilo {self.node_id}] Fui promovido! A assumir o estado do Coordenador...")
+        
+        # Reconstruir a Tabela com o backup
+        tabela_recuperada = GlobalTable()
+        tabela_recuperada.nodes = self.replica_global_table
+        
+        # Instanciar o novo Coordenador com a Tabela em vez da DHT
+        novo_coordenador = Coordinator(
+            dataset=[], 
+            model=None, 
+            global_table=tabela_recuperada, # <-- NOME ALTERADO
+            model_type="generic"
+        )
+        
+        novo_coordenador.task_pool = self.replica_queue
+        novo_coordenador.best_model = self.replica_best_model
+        
+        if self.event_bus is not None:
+            from peer.peer_inner_protocol import PupilPromoted
+            self._emit(PupilPromoted(coordinator=novo_coordenador))
