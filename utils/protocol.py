@@ -225,7 +225,7 @@ class MaekawaRelease:
 @dataclass
 class SyncState:
     id_node: str # id do servidor
-    dht_snapshot: dict
+    global_table_snapshot: dict
     task_queue_snapshot: list
     best_model_metrics: dict
     type: str = field(default=MSG_SYNC_STATE, init=False)

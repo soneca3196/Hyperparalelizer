@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from core.network import send_once
 from core.pubsub import TOPIC_GLOBAL_BEST_SCORE
-from hyperparalelizer.server.Global_Table_global import Global_Table
+from hyperparalelizer.global_table import GlobalTable
 from utils.protocol import PubSubPublish, TrainingTask
 
 TASK_TIMEOUT = 30.0  # segundos até uma tarefa ser considerada perdida
@@ -25,7 +25,7 @@ TASK_TIMEOUT = 30.0  # segundos até uma tarefa ser considerada perdida
 class Peer:
     ip: str
     port: int
-    id_node: str = ""          # preenchido pelo Global_Table após add_node
+    id_node: str = ""          # preenchido pelo GlobalTable após add_node
     hyperparameters: dict = field(default_factory=dict)
     metrics: dict = field(default_factory=dict)
     received_dataset: bool = False
@@ -41,7 +41,7 @@ class State(Enum):
 
 
 class Coordinator:
-    def __init__(self, dataset, model, Global_Table: Global_Table,
+    def __init__(self, dataset, model, GlobalTable: GlobalTable,
                  model_type: str = "generic",
                  model_config: Optional[Dict[str, Any]] = None,
                  pubsub_queue: Optional[queue.Queue] = None):
@@ -51,7 +51,7 @@ class Coordinator:
         self.model_type = model_type
         self.model_config = model_config or {}
 
-        self.Global_Table: Global_Table = Global_Table
+        self.GlobalTable: GlobalTable = GlobalTable
         self.peers: List[Peer] = []
 
         self.task_pool: List[TrainingTask] = []
@@ -71,8 +71,8 @@ class Coordinator:
 
     # ENDPOINT: ADICIONA NOVO PEER                                      
     def add_peer(self, peer: Peer) -> str:
-        # Ao entrar na rede, cada peer recebe um ID único baseado no hash SHA-256(IP:Porta), gerado pela Global_Table.
-        node_id = self.Global_Table.add_node(peer.ip, peer.port, {
+        # Ao entrar na rede, cada peer recebe um ID único baseado no hash SHA-256(IP:Porta), gerado pela GlobalTable.
+        node_id = self.GlobalTable.add_node(peer.ip, peer.port, {
             "received_dataset": peer.received_dataset,
             "received_model": peer.received_model,
         })
@@ -86,7 +86,7 @@ class Coordinator:
         if self.dataset_fragments:
             frag_index = peer_index % len(self.dataset_fragments)
             fragment_name = self.dataset_fragments[frag_index]
-            self.Global_Table.add_fragment_location(fragment_name, node_id)
+            self.GlobalTable.add_fragment_location(fragment_name, node_id)
 
         # Atribui hiperparâmetros pendentes da fila
         self.assign_hyperparameters_to_peer(peer)
@@ -147,7 +147,7 @@ class Coordinator:
     def fragment_dataset(self, n_fragments: Optional[int] = None) -> List[str]:
         """
         Divide self.dataset em n_fragments partes e registra cada fragmento
-        na Global_Table associado ao peer correspondente (se já houver peers)
+        na GlobalTable associado ao peer correspondente (se já houver peers)
         """
         if n_fragments is None:
             n_fragments = max(1, len(self.peers))
@@ -170,7 +170,7 @@ class Coordinator:
 
             # Associa o fragmento ao peer já registrado, se houver
             if i < len(self.peers):
-                self.Global_Table.add_fragment_location(frag_name, self.peers[i].id_node)
+                self.GlobalTable.add_fragment_location(frag_name, self.peers[i].id_node)
 
         with self._lock:
             self.dataset_fragments = fragment_names
@@ -285,7 +285,7 @@ class Coordinator:
         msg = {
             "type": "SyncState",
             "id_node": "server",
-            "Global_Table_snapshot": self.Global_Table.nodes, 
+            "global_table_snapshot": self.global_table.nodes, 
             "task_queue_snapshot": self.task_pool,
             "best_model_metrics": self.best_model
         }
