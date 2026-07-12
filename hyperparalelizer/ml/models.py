@@ -23,6 +23,9 @@ class BaseModel:
 
     def predict(self, X):
         """Retorna as classes preditas para as amostras em X."""
+        if self.model is None:
+            raise ValueError("O modelo ainda não foi treinado. Chame o método 'fit' antes de 'predict'.")
+        
         return self.model.predict(X)
 
     def predict_proba(self, X):
@@ -32,6 +35,9 @@ class BaseModel:
         Para classificação multiclasse, retorna a matriz completa de probabilidades.
         Retorna None se o modelo subjacente não suportar predict_proba.
         """
+        if self.model is None:
+            raise ValueError("O modelo ainda não foi treinado. Chame o método 'fit' antes de 'predict_proba'.")
+
         if not hasattr(self.model, "predict_proba"):
             return None
         proba = self.model.predict_proba(X)
