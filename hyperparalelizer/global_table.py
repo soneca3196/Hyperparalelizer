@@ -17,10 +17,12 @@ class GlobalTable:
 
     # adiciona um no a GlobalTable, armazenando seu IP, porta e metadados
     def add_node(self, ip, port, metadata):
+        ''' Adiciona node a table, e retorna o node_id para administração interna do coordinator'''
         node_id = self.generate_hash(f"{ip}:{port}")
         
         with self.lock: # bloqueia para outras threads enquanto escreve
             self.nodes[node_id] = {
+                "node_id": node_id,
                 "ip": ip,
                 "port": port,
                 "metadata": metadata # ex: {"ram": "8GB", "cpu_usage": "20%"}

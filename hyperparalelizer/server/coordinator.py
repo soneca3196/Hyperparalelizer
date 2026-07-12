@@ -72,10 +72,14 @@ class Coordinator:
     # ENDPOINT: ADICIONA NOVO PEER                                      
     def add_peer(self, peer: Peer) -> str:
         # Ao entrar na rede, cada peer recebe um ID único baseado no hash SHA-256(IP:Porta), gerado pela GlobalTable.
-        node_id = self.GlobalTable.add_node(peer.ip, peer.port, {
+        node_id = self.GlobalTable.add_node(
+            peer.ip, 
+            peer.port, 
+            {
             "received_dataset": peer.received_dataset,
             "received_model": peer.received_model,
-        })
+            }
+        )
         peer.id_node = node_id
 
         with self._lock:
