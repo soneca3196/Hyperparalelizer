@@ -47,7 +47,15 @@ class TrainerNode:
     # Receber task
 
     async def handle_training_task(self, task: Dict[str, Any]) -> None:
-        task_id = task.get("task_id")
+
+        task_id_raw = task.get("task_id")
+        if not isinstance(task_id_raw, str) or not task_id_raw:
+            log.error(f"[Trainer {self.node_id[:8]}...] task_id ausente ou inválido")
+            self._send_result(task, metrics=None, error="invalid_task")
+            return
+
+        task_id = task_id_raw
+
         log.info(f"[Trainer {self.node_id[:8]}...] TrainingTask '{task_id}' recebida")
 
         # garante os fragmentos
@@ -68,7 +76,7 @@ class TrainerNode:
         
         try:
             # Retorna as métricas e um booleano dizendo se quebrou o recorde
-            metrics, is_new_best = await loop.run_in_executor(None, self._train_task, task, fragment_ids)
+            metrics, is_new_best = await loop.run_in_executor(None, self._train_task, task, fragment_ids, task_id)
         except Exception as exc:
             log.error(f"[Trainer {self.node_id[:8]}...] erro durante treino: {exc}")
             self._send_result(task, metrics=None, error=str(exc))
@@ -95,7 +103,7 @@ class TrainerNode:
 
     # Treinamento (síncrono)
 
-    def _train_task(self, task: Dict[str, Any], fragment_ids: List[str]) -> tuple:
+    def _train_task(self, task: Dict[str, Any], fragment_ids: List[str], task_id: str) -> tuple:
         print(f"[Trainer {self.node_id}] Iniciando treinamento..")
 
         X, y = self.dataset_loader.load(fragment_ids)
@@ -123,7 +131,7 @@ class TrainerNode:
             print(f"[Trainer {self.node_id}] Novo melhor modelo!")
             self._emit(
                 BestModelUpdatedLocally(
-                    task_id=task.get("task_id"), node_id=self.node_id, score=score
+                    task_id=task_id, node_id=self.node_id, score=score
                 )
             )
 
@@ -191,7 +199,7 @@ class TrainerNode:
         novo_coordenador = Coordinator(
             dataset=[], 
             model=None, 
-            global_table=tabela_recuperada, # <-- NOME ALTERADO
+            GlobalTable=tabela_recuperada, 
             model_type="generic"
         )
         
