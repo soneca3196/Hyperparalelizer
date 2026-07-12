@@ -132,6 +132,9 @@ class InternalEventBus:
 
     def publish(self, event: InternalEvent) -> None:
         event_type = getattr(event, "type", None)
+        if event_type is None:
+            raise ValueError("event_type is None")
+        
         self._history.put(event)
 
         with self._lock:
