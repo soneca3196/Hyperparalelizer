@@ -1,6 +1,9 @@
 import asyncio
 from typing import Dict, Any
 from core.network import send_once
+from utils.logger import get_logger
+
+log = get_logger("sync/bully")
 
 class BullyElection:
     def __init__(self, my_id: str, globaltable_peers: Dict[str, Any], promote_callback):
@@ -51,11 +54,20 @@ class BullyElection:
     # Handlers para P2PNode
     async def handle_election(self, msg: dict, writer: asyncio.StreamWriter):
         sender_id = msg.get("id_node")
-        if self.my_id > sender_id:
-            alive_msg = {"type": "BullyAlive", "id_node": self.my_id}
-            await send_once(writer.get_extra_info('peername')[0], msg.get("port", 5000), alive_msg, expect_reply=False)
-            if not self.election_in_progress:
-                asyncio.create_task(self.detect_timeout_and_start())
+        # Normaliza e valida sender_id antes de comparar (pode ser None)
+        if sender_id is None:
+            return
+        # Compare como strings (IDs são hashes/strings lexicográficos)
+        try:
+            if str(self.my_id) > str(sender_id):
+                alive_msg = {"type": "BullyAlive", "id_node": self.my_id}
+                await send_once(writer.get_extra_info('peername')[0], msg.get("port", 5000), alive_msg, expect_reply=False)
+                if not self.election_in_progress:
+                    asyncio.create_task(self.detect_timeout_and_start())
+        except Exception:
+            # Em caso de erro inesperado, não interrompe o nó
+            log.warning("Exception caught in handle_election loop")
+            return
 
     async def handle_coordinator(self, msg: dict, writer: asyncio.StreamWriter):
         new_coord = msg.get("id_node")
