@@ -133,15 +133,20 @@ class PersistentConnection:
                 "Connection is not open. Call connect() first."
             )
 
-        await send_message(self._writer, data)
+        writer = self._writer
+        if writer is None:
+            raise RuntimeError("Connection is not open. Call connect() first.")
+
+        await send_message(writer, data)
 
     async def recv(self) -> Dict[str, Any]:
         """Recebe um frame."""
-        if not self.is_open:
+        reader = self._reader
+        if not self.is_open or reader is None:
             raise RuntimeError("Connection is not open.")
 
         return await asyncio.wait_for(
-            recv_message(self._reader),
+            recv_message(reader),
             timeout=self.timeout,
         )
 
@@ -388,6 +393,8 @@ class P2PNode:
         from utils.protocol import Ack, MSG_KEEP_ALIVE
 
         keepalive_ref = self.keepalive
+        if keepalive_ref is None:
+            raise RuntimeError("keepalive broke")
 
         async def _handle_keepalive(
             msg: Dict[str, Any],
