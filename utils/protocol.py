@@ -198,8 +198,10 @@ class ErrorMsg:
 def from_dict(data: Dict[str, Any]):
     """Builds a message object from dict data."""
     msg_type = data.get("type")
-    cls = _TYPE_MAP.get(msg_type)
+    if msg_type is None:
+        raise ValueError(f"Unknown message type: {msg_type!r}")
 
+    cls = _TYPE_MAP.get(msg_type)
     if cls is None:
         raise ValueError(f"Unknown message type: {msg_type!r}")
 
