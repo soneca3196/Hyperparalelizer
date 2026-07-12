@@ -7,10 +7,10 @@ from typing import Any, Dict, List, Optional
 
 from sklearn.model_selection import train_test_split
 
-from ml.models import get_model
-from ml.evaluator import evaluate
+from hyperparalelizer.ml.models import get_model
+from hyperparalelizer.ml.evaluator import evaluate
 from utils.logger import get_logger
-from peer.peer_inner_protocol import (
+from hyperparalelizer.peer.peer_inner_protocol import (
     InternalEventBus,
     TrainingStarted,
     TrainingFinished,
