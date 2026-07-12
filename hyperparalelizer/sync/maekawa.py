@@ -68,7 +68,7 @@ class MaekawaMutex:
             
             # Busca o IP e Porta 
             ip_do_no, porta_do_no = self._get_peer_address(req_node)
-            if ip_do_no:
+            if ip_do_no and porta_do_no:
                 await send_once(ip_do_no, porta_do_no, grant_msg, expect_reply=False)
 
 
@@ -86,7 +86,8 @@ class MaekawaMutex:
             grant_msg = {"type": "MaekawaGrant", "id_node": self.node_id}
             
             ip_do_no, porta_do_no = self._get_peer_address(target_node_id)
-            if ip_do_no:
+
+            if ip_do_no and porta_do_no:
                 await send_once(ip_do_no, porta_do_no, grant_msg, expect_reply=False)
             
             self.voted = True
