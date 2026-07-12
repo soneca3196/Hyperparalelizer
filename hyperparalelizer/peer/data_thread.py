@@ -173,6 +173,10 @@ class DataThread:
     async def notify_dataset_ready(self, fragment_id: Optional[str] = None) -> bool:
         """Avisa o servidor que o dataset já está montado, para entrar em trenio"""
         fid = fragment_id or self.fragment_id
+        if fid is None:
+            log.warning("DataThread: fragment_id is None; cannot notify server.")
+            return False
+
         msg = DatasetReady(id_node=self.node_id, fragment_id=fid).to_dict()
 
         reply = await send_once(
