@@ -51,7 +51,7 @@ class Coordinator:
         self.model_type = model_type
         self.model_config = model_config or {}
 
-        self.GlobalTable: GlobalTable = GlobalTable
+        self.GlobalTable = GlobalTable
         self.peers: List[Peer] = []
 
         self.task_pool: List[TrainingTask] = []
@@ -278,16 +278,21 @@ class Coordinator:
         return peer, task
 
     def replicate_state_to_pupil(self):
-        # Envia estado para o Peer Pupilo a cada mudança 
-        if not getattr(self, 'pupil_peer', None):
-            return # Ainda não há pupilo definido
-            
+        pupil_peer = getattr(self, 'pupil_peer', None)
+        if not isinstance(pupil_peer, dict):
+            return
+
+        ip = pupil_peer.get('ip')
+        port = pupil_peer.get('port')
+        if ip is None or port is None:
+            return
+
         msg = {
             "type": "SyncState",
             "id_node": "server",
-            "global_table_snapshot": self.global_table.nodes, 
+            "global_table_snapshot": self.GlobalTable.nodes,
             "task_queue_snapshot": self.task_pool,
-            "best_model_metrics": self.best_model
+            "best_model_metrics": self.best_model,
         }
-        
-        asyncio.create_task(send_once(self.pupil_peer['ip'], self.pupil_peer['port'], msg, expect_reply=False))
+
+        asyncio.create_task(send_once(ip, port, msg, expect_reply=False))
