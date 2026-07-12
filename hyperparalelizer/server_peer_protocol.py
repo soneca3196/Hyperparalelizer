@@ -32,7 +32,7 @@ import pickle
 from typing import Any, Dict, Optional
 
 from core.network import send_message
-from hyperparalelizer.server.middleware import Coordinator, Peer
+from hyperparalelizer.server.coordinator import Coordinator, Peer
 from utils.logger import get_logger
 from utils.protocol import (
     MSG_JOIN_NETWORK,

@@ -7,8 +7,8 @@ from typing import Any, Dict, List, Optional
 from utils.logger import get_logger
 from utils.protocol import JoinNetwork, DatasetReady, MSG_JOIN_ACK
 from core.network import send_once
-from peer.download_worker import fetch_fragment, fetch_fragment_from_backup
-from peer.peer_inner_protocol import (
+from hyperparalelizer.peer.download_worker import fetch_fragment, fetch_fragment_from_backup
+from hyperparalelizer.peer.peer_inner_protocol import (
     InternalEventBus,
     FragmentAcquired,
     FragmentAssemblyFailed,

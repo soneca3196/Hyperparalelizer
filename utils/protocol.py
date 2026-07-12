@@ -27,6 +27,13 @@ MSG_BULLY_ELECTION = "BullyElection"
 MSG_BULLY_ALIVE = "BullyAlive"
 MSG_BULLY_COORDINATOR = "BullyCoordinator"
 MSG_SYNC_STATE = "SyncState"
+MSG_DATASET_READY = "DatasetReady"
+MSG_JOIN_ACK = MSG_ACK  # o servidor confirma JoinNetwork com um Ack genérico
+MSG_REQUEST_FRAGMENT = "RequestFragment"
+MSG_FRAGMENT_DATA = "FragmentData"
+MSG_FRAGMENT_NOT_FOUND = "FragmentNotFound"
+MSG_REQUEST_FRAGMENT_BACKUP = "RequestFragmentBackup"
+MSG_FRAGMENT_BACKUP = "FragmentBackup"
 
 
 @dataclass
@@ -253,6 +260,56 @@ class BullyCoordinatorMsg:
     def to_dict(self): return asdict(self)
 
 
+@dataclass
+class DatasetReady:
+    id_node: str
+    fragment_id: str
+    type: str = field(default=MSG_DATASET_READY, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class RequestFragment:
+    id_node: str
+    fragment_id: str
+    type: str = field(default=MSG_REQUEST_FRAGMENT, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class FragmentData:
+    id_node: str
+    fragment_id: str
+    data: bytes
+    type: str = field(default=MSG_FRAGMENT_DATA, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class FragmentNotFound:
+    id_node: str
+    fragment_id: str
+    type: str = field(default=MSG_FRAGMENT_NOT_FOUND, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class RequestFragmentBackup:
+    id_node: str
+    fragment_id: str
+    type: str = field(default=MSG_REQUEST_FRAGMENT_BACKUP, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class FragmentBackupData:
+    id_node: str
+    fragment_id: str
+    data: bytes
+    type: str = field(default=MSG_FRAGMENT_BACKUP, init=False)
+    def to_dict(self): return asdict(self)
+
+
 # Mapeamento de tipo para as mensagens
 _TYPE_MAP = {
     MSG_JOIN_NETWORK: JoinNetwork,
@@ -274,6 +331,12 @@ _TYPE_MAP = {
     MSG_BULLY_ALIVE: BullyAliveMsg,
     MSG_BULLY_COORDINATOR: BullyCoordinatorMsg,
     MSG_SYNC_STATE: SyncState,
+    MSG_DATASET_READY: DatasetReady,
+    MSG_REQUEST_FRAGMENT: RequestFragment,
+    MSG_FRAGMENT_DATA: FragmentData,
+    MSG_FRAGMENT_NOT_FOUND: FragmentNotFound,
+    MSG_REQUEST_FRAGMENT_BACKUP: RequestFragmentBackup,
+    MSG_FRAGMENT_BACKUP: FragmentBackupData,
 }
 
 

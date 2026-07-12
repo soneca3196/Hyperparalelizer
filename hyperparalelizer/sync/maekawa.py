@@ -1,6 +1,6 @@
 import asyncio
 from typing import List, Dict, Any
-from sync.lamport import LamportClock
+from hyperparalelizer.sync.lamport import LamportClock
 from core.network import send_once
 
 class MaekawaMutex:
