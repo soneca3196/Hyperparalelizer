@@ -10,7 +10,7 @@ import asyncio
 from typing import Any, Callable, Coroutine, Dict, Optional
 
 from core.network import recv_message
-from hyperparalelizer.server.middleware import Coordinator
+from hyperparalelizer.server.coordinator import Coordinator
 from utils.logger import get_logger
 
 log = get_logger("server_messenger")
