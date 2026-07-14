@@ -49,6 +49,18 @@ class JoinNetwork:
     def to_dict(self):
         return asdict(self)
 
+@dataclass
+class JoinAck:
+    node_id: str
+    fragment_id: Optional[str]
+    peers: List[Dict[str, Any]]
+    task: Optional[Dict[str, Any]] = None
+
+    type: str = field(default=MSG_JOIN_ACK, init=False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass
 class FindNode:
@@ -315,6 +327,7 @@ class FragmentBackupData:
 # Mapeamento de tipo para as mensagens
 _TYPE_MAP = {
     MSG_JOIN_NETWORK: JoinNetwork,
+    MSG_JOIN_ACK: JoinAck,
     MSG_FIND_NODE: FindNode,
     MSG_KEEP_ALIVE: KeepAlive,
     MSG_TRAINING_TASK: TrainingTask,
