@@ -1,15 +1,60 @@
+# "container" thread-safe para variaveis de dicionários e listas críticos
+
 import hashlib
 import threading
+from enum import Enum
+
+class ServerState(Enum):
+    HASHING = 0
+    OPEN = 1
 
 class GlobalTable:
-    def __init__(self):
-        # tabela para mapear: hash(IP+Porta) -> Metadados do Nó
-        self.nodes = {}
-        # tabela para mapear: hash(Nome do Fragmento) -> lista de IPs/IDs
-        self.fragments_dataset = {}
+    def __init__(self, snapshot=None):
+        self.lock = threading.Lock() # garante que duas threads nao modifiquem a GlobalTable ao mesmo tempo
+
+        if snapshot is not None:
+            self.overwrite_from_snapshot(snapshot)
+            return
         
-        # garanti que duas threads nao modifiquem a GlobalTable ao mesmo tempo
-        self.lock = threading.Lock()
+        self.nodes = {} # tabela para mapear: hash(IP+Porta) -> Metadados do Nó
+        #self.server_state = ServerState('HASHING')
+        self.fragments_dataset = {} # tabela para mapear: hash(Nome do Fragmento) -> lista de IPs/IDs
+        self.best_model = None
+
+        self.task_pool = []
+        self.assigned_tasks = {}      # task_id -> {node_id, task, timestamp}
+        
+        
+    def set_best_model(self, model_data):
+        with self.lock:
+            self.best_model = model_data
+
+    def get_best_model(self):
+        with self.lock:
+            return self.best_model
+
+
+    def get_snapshot(self):
+        """Retorna uma cópia limpa de todo o estado para enviar ao pupilo."""
+        with self.lock:
+            return {
+                "nodes": self.nodes.copy(),
+                "fragments": self.fragments.copy(),
+                "system_state": self.system_state,
+                "best_model": self.best_model.copy() if self.best_model else None,
+                "task_pool": list(self.task_pool),
+                "assigned_tasks": self.assigned_tasks.copy()
+            }
+        
+    def overwrite_from_snapshot(self, snapshot):
+        """Usado pelo pupilo para assumir o estado se o mestre cair."""
+        with self.lock:
+            self.nodes = snapshot.get("nodes", {})
+            self.fragments = snapshot.get("fragments", {})
+            self.system_state = snapshot.get("system_state", "HASHING")
+            self.best_model = snapshot.get("best_model", None)
+            self.task_pool = snapshot.get("task_pool", [])
+            self.assigned_tasks = snapshot.get("assigned_tasks", {})
 
     # gera o hash sha256 dado o ip + porta ou nome do fragmento
     def generate_hash(self, key_string):
@@ -25,7 +70,7 @@ class GlobalTable:
                 "node_id": node_id,
                 "ip": ip,
                 "port": port,
-                "metadata": metadata # ex: {"ram": "8GB", "cpu_usage": "20%"}
+                "metadata": metadata # dados Peer
             }
         return node_id
 
@@ -68,58 +113,3 @@ class GlobalTable:
         frag_id = self.generate_hash(fragment_name)
         with self.lock:
             return self.fragments_dataset.get(frag_id, [])
-        
-
-# Teste do GlobalTable
-# if __name__ == "__main__":
-#     import time
-
-#     print("--- INICIANDO TESTES DA GlobalTable (HYPERPARALELIZER) ---\n")
-    
-#     # instanciando a GlobalTable
-#     GlobalTable = GlobalTable()
-    
-#     # testando a adição de nós
-#     print("Adicionando nós na rede...")
-#     id_barriga = GlobalTable.add_node("192.168.0.10", 5000, {"role": "Coordenador (Barriga)", "ram": "16GB"})
-#     id_madruga1 = GlobalTable.add_node("192.168.0.11", 5001, {"role": "Treinador (Madruga 1)", "ram": "8GB"})
-#     id_madruga2 = GlobalTable.add_node("192.168.0.12", 5001, {"role": "Treinador (Madruga 2)", "ram": "4GB"})
-    
-#     print(f" -> ID Barriga: {id_barriga}")
-#     print(f" -> ID Madruga 1: {id_madruga1}")
-#     print(f" -> ID Madruga 2: {id_madruga2}\n")
-
-#     # listagem de todos os nós ativos
-#     print("Listando todos os nós ativos:")
-#     todos_nos = GlobalTable.get_all_nodes()
-#     for no in todos_nos:
-#         print(f" -> IP: {no['ip']} | Role: {no['metadata']['role']}")
-#     print("")
-
-#     # mapeamento de fragmentos do dataset
-#     print("Distribuindo fragmentos do dataset...")
-#     # 1 pega o fragmento 1 e 2
-#     GlobalTable.add_fragment_location("frag_treino_01.csv", id_madruga1)
-#     GlobalTable.add_fragment_location("frag_treino_02.csv", id_madruga1)
-    
-#     # 2 pega o fragmento 2 (redundância) e 3
-#     GlobalTable.add_fragment_location("frag_treino_02.csv", id_madruga2)
-#     GlobalTable.add_fragment_location("frag_treino_03.csv", id_madruga2)
-    
-#     # verifica onde está o fragmento 2
-#     locais_frag_2 = GlobalTable.get_fragment_locations("frag_treino_02.csv")
-#     print(f" -> O 'frag_treino_02.csv' está salvo nos nós (IDs): {locais_frag_2}\n")
-
-#     # testando a remoção de um nó (caso falha de KeepAlive)
-#     print("Simulando queda do Madruga 1 (KeepAlive falhou)...")
-#     GlobalTable.remove_node(id_madruga1)
-    
-#     # verificando se ele sumiu da lista de nós
-#     nos_restantes = GlobalTable.get_all_nodes()
-#     print(f" -> Quantidade de nós ativos agora: {len(nos_restantes)}")
-    
-#     # verificando se a GlobalTable limpou os fragmentos que pertenciam a ele
-#     locais_frag_2_atualizado = GlobalTable.get_fragment_locations("frag_treino_02.csv")
-#     print(f" -> O 'frag_treino_02.csv' agora está salvo apenas em: {locais_frag_2_atualizado}")
-    
-#     print("\n--- TESTES FINALIZADOS ---")
