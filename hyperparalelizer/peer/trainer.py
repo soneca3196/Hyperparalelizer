@@ -21,6 +21,8 @@ from hyperparalelizer.peer.peer_inner_protocol import (
 from hyperparalelizer.server.coordinator import Coordinator
 from hyperparalelizer.global_table import GlobalTable
 
+from peer.peer_inner_protocol import PupilPromoted
+
 log = get_logger("trainer")
 
 
@@ -207,5 +209,4 @@ class TrainerNode:
         novo_coordenador.best_model = self.replica_best_model
         
         if self.event_bus is not None:
-            from peer.peer_inner_protocol import PupilPromoted
             self._emit(PupilPromoted(coordinator=novo_coordenador))
