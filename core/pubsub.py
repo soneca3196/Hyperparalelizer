@@ -300,7 +300,7 @@ class PubSubClient:
 
                 topic = item.get("topic", "")
                 payload = item.get("payload", {})
-                lamport = item.get("lamport", 0)
+                lamport = item.get("lamport_clock", item.get("lamport", 0))
 
                 if not topic:
                     log.warning(

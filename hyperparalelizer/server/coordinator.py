@@ -330,9 +330,11 @@ class Coordinator:
             )
             return peer, task
 
-        peer.metrics = metrics
-        new_score = float(score)
 
+        with self.GlobalTable.lock:
+            self.GlobalTable.assigned_tasks.pop(task_id, None)
+
+        peer.metrics = metrics
         new_score = float(metrics.get("f1_score") or 0.0)
         
         # Obtém o score do melhor modelo atual usando o método thread-safe da GlobalTable
