@@ -3,7 +3,18 @@ from typing import List, Dict, Any
 from hyperparalelizer.sync.lamport import LamportClock
 from core.network import send_once
 
+
+class MaekawaTimeoutError(Exception):
+    """Levantada quando request_access() não consegue obter o quórum
+    completo de grants dentro do tempo/tentativas configurados."""
+    pass
+
+
 class MaekawaMutex:
+    # Configuração padrão de timeout/retry para aquisição do lock
+    DEFAULT_GRANT_TIMEOUT = 10.0   # segundos por tentativa
+    DEFAULT_MAX_RETRIES = 3        # tentativas antes de desistir
+
     def __init__(self, node_id: str, quorum: List[Dict[str, Any]]):
         self.node_id = node_id
         self.quorum = quorum  # Lista de dicionários com 'ip' e 'port' dos membros do quórum
@@ -14,26 +25,56 @@ class MaekawaMutex:
         self.voted = False
         self.request_queue = [] # Fila de prioridade: (timestamp, node_id)
         
-        self.grants_received = 0
+        self.granted_by = set()
         self.grant_event = asyncio.Event()
 
 
-    async def request_access(self):
-        """Peer invoca isso antes de tentar atualizar o best_model."""
+    async def request_access(
+        self,
+        timeout: float = DEFAULT_GRANT_TIMEOUT,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+    ):
+        """Peer invoca isso antes de tentar atualizar o best_model
+        """
         self.state = "WANTED"
-        self.grants_received = 0
+        self.granted_by = set()
         self.grant_event.clear()
-        
+
         req_time = self.clock.increment()
         msg = {"type": "MaekawaRequest", "id_node": self.node_id, "timestamp": req_time}
-        
-        # Envia Request para todo o quórum
-        for peer in self.quorum:
-            asyncio.create_task(send_once(peer['ip'], peer['port'], msg, expect_reply=False))
-        
-        # Aguarda a maioria/todos do quórum concederem
-        await self.grant_event.wait()
-        self.state = "HELD"
+
+        pending = list(self.quorum)
+
+        for attempt in range(1, max_retries + 1):
+            # Envia (ou reenvia) Request apenas para quem ainda não concedeu
+            for peer in pending:
+                if peer['id_node'] not in self.granted_by:
+                    asyncio.create_task(
+                        send_once(peer['ip'], peer['port'], msg, expect_reply=False)
+                    )
+
+            try:
+                await asyncio.wait_for(self.grant_event.wait(), timeout=timeout)
+                self.state = "HELD"
+                return
+            except asyncio.TimeoutError:
+                missing = [p['id_node'] for p in pending if p['id_node'] not in self.granted_by]
+                if attempt < max_retries:
+                    continue  # tenta de novo, só para quem falta
+
+        # Esgotou as tentativas: desiste e libera quem já tinha votado
+        self.state = "RELEASED"
+        release_msg = {"type": "MaekawaRelease", "id_node": self.node_id}
+        for peer in pending:
+            if peer['id_node'] in self.granted_by:
+                asyncio.create_task(
+                    send_once(peer['ip'], peer['port'], release_msg, expect_reply=False)
+                )
+
+        raise MaekawaTimeoutError(
+            f"Timeout aguardando quórum Maekawa: {len(self.granted_by)}/{len(self.quorum)} "
+            f"grants recebidos após {max_retries} tentativas. Faltando: {missing}"
+        )
 
 
     async def release_access(self):
@@ -73,8 +114,11 @@ class MaekawaMutex:
 
 
     async def handle_grant(self, msg: dict, writer: asyncio.StreamWriter):
-        self.grants_received += 1
-        if self.grants_received >= len(self.quorum):
+        sender_id = msg.get("id_node")
+        if sender_id:
+            self.granted_by.add(sender_id)
+
+        if len(self.granted_by) >= len(self.quorum):
             self.grant_event.set()
 
 

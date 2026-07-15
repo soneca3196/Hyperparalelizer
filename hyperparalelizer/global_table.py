@@ -18,7 +18,7 @@ class GlobalTable:
         self.nodes = {} # tabela para mapear: hash(IP+Porta) -> Metadados do Nó
         self.fragments_payloads = {} # Conteudo Real do Fragmento
         self.fragments_locations = {} # Localizacao do Fragmentos na rede de peers
-        self.system_state = ServerState.HASHING
+        self._system_state = ServerState.HASHING
         self.best_model = None
         self.task_pool = []
         self.assigned_tasks = {} # task_id -> {node_id, task, timestamp}
@@ -26,7 +26,28 @@ class GlobalTable:
         if snapshot is not None:
             self.overwrite_from_snapshot(snapshot)
             return
-        
+
+    @property
+    def system_state(self) -> ServerState:
+        return self._system_state
+
+    @system_state.setter
+    def system_state(self, value):
+        if isinstance(value, ServerState):
+            self._system_state = value
+        elif isinstance(value, str):
+            try:
+                self._system_state = ServerState[value]
+            except KeyError:
+                raise ValueError(
+                    f"system_state inválido: {value!r}. "
+                    f"Esperado um dos: {[s.name for s in ServerState]}"
+                )
+        else:
+            raise TypeError(
+                f"system_state deve ser ServerState ou str, recebeu {type(value)}"
+            )
+
     def set_best_model(self, model_data):
         with self.lock:
             self.best_model = model_data
@@ -36,8 +57,9 @@ class GlobalTable:
             return self.best_model
 
 
-    def get_snapshot(self):
-        """Retorna uma cópia limpa de todo o estado para enviar ao pupilo."""
+    def get_snapshot(self, include_fragment_payloads: bool = True):
+        """Retorna uma cópia limpa de todo o estado para enviar ao pupilo
+        """
         with self.lock:
             # Serializa os nós (Convertendo Peer em dicionário)
             nodes_serialized = {}
@@ -66,9 +88,12 @@ class GlobalTable:
 
             return {
                 "nodes": nodes_serialized,
-                "fragments_payloads": self.fragments_payloads.copy(),
+                "fragments_payloads": (
+                    self.fragments_payloads.copy() if include_fragment_payloads else {}
+                ),
                 "fragments_locations": {k: list(v) for k, v in self.fragments_locations.items()},
-                "system_state": self.system_state if isinstance(self.system_state, str) else str(self.system_state),
+                
+                "system_state": self._system_state.name,
                 "best_model": self.best_model.copy() if self.best_model else None,
                 "task_pool": task_pool_serialized,
                 "assigned_tasks": assigned_tasks_serialized.copy()

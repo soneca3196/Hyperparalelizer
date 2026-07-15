@@ -238,48 +238,64 @@ class KeepAliveManager:
     async def stop(self) -> None:
         self._running = False
 
-    async def _probe_all(self) -> None:
-        """Envia heartbeats."""
+    async def _probe_one(self, peer_id: str, info: Dict[str, Any]) -> Optional[str]:
+        """Retorna peer_id se o peer deve ser considerado morto, ou None se não"""
         from utils.protocol import KeepAlive
 
+        msg = KeepAlive(
+            id_node=self.node_id,
+        ).to_dict()
+
+        reply = await send_once(
+            info["ip"],
+            info["port"],
+            msg,
+            expect_reply=True,
+            timeout=self.interval * 0.8,
+        )
+
+        async with self._lock:
+            if peer_id not in self._peers:
+                return None
+
+            if reply is not None:
+                self._peers[peer_id]["missed"] = 0
+                self._peers[peer_id]["last_seen"] = time.monotonic()
+                return None
+
+            self._peers[peer_id]["missed"] += 1
+            missed = self._peers[peer_id]["missed"]
+
+            log.warning(
+                f"KeepAlive: {peer_id[:8]}… did not respond "
+                f"({missed}/{self.missed_limit})"
+            )
+
+            if missed >= self.missed_limit:
+                return peer_id
+            return None
+
+    async def _probe_all(self) -> None:
+        """Envia heartbeats
+        """
         async with self._lock:
             peers_snapshot = dict(self._peers)
 
+        results = await asyncio.gather(
+            *(
+                self._probe_one(peer_id, info)
+                for peer_id, info in peers_snapshot.items()
+            ),
+            return_exceptions=True,
+        )
+
         dead = []
-
-        for peer_id, info in peers_snapshot.items():
-            msg = KeepAlive(
-                id_node=self.node_id,
-            ).to_dict()
-
-            reply = await send_once(
-                info["ip"],
-                info["port"],
-                msg,
-                expect_reply=True,
-                timeout=self.interval * 0.8,
-            )
-
-            async with self._lock:
-                if peer_id not in self._peers:
-                    continue
-
-                if reply is not None:
-                    self._peers[peer_id]["missed"] = 0
-                    self._peers[peer_id]["last_seen"] = time.monotonic()
-
-                else:
-                    self._peers[peer_id]["missed"] += 1
-
-                    missed = self._peers[peer_id]["missed"]
-
-                    log.warning(
-                        f"KeepAlive: {peer_id[:8]}… did not respond "
-                        f"({missed}/{self.missed_limit})"
-                    )
-
-                    if missed >= self.missed_limit:
-                        dead.append(peer_id)
+        for peer_id, result in zip(peers_snapshot.keys(), results):
+            if isinstance(result, Exception):
+                log.error(f"KeepAlive: erro ao sondar {peer_id[:8]}… — {result}")
+                continue
+            if result is not None:
+                dead.append(result)
 
         for peer_id in dead:
             async with self._lock:

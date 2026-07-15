@@ -120,7 +120,7 @@ class TrainerNode:
 
         print(f"[Trainer {self.node_id}] Métricas: {metrics}")
 
-        score = metrics["f1_score"]  # pode ser trocado para ROC AUC
+        score = metrics["f1"]  # pode ser trocado para ROC AUC
         is_new_best = False
         
         if score > self.best_score:

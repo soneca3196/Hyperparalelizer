@@ -7,7 +7,7 @@ Os handlers concretos de protocolo são registrados externamente via register_al
 import asyncio
 from typing import Any, Callable, Coroutine, Dict, Optional
 
-from core.network import DEFAULT_TIMEOUT, recv_message
+from core.network import DEFAULT_TIMEOUT, recv_message, send_message
 from hyperparalelizer.server.coordinator import Coordinator
 from utils.logger import get_logger
 
@@ -78,12 +78,30 @@ class ServerMessenger:
                 handler = self._handlers.get(msg_type)
                 if handler is None:
                     log.warning(f"Tipo de mensagem desconhecido: '{msg_type}' de {peer_addr}")
+                    err = {
+                        "type": "Error",
+                        "code": "UNKNOWN_TYPE",
+                        "detail": msg_type,
+                    }
+                    try:
+                        await send_message(writer, err)
+                    except Exception:
+                        pass
                     continue
 
                 try:
                     await handler(msg, writer)
                 except Exception as exc:
                     log.error(f"Handler de '{msg_type}' falhou para {peer_addr}: {exc}")
+                    err = {
+                        "type": "Error",
+                        "code": "HANDLER_ERROR",
+                        "detail": str(exc),
+                    }
+                    try:
+                        await send_message(writer, err)
+                    except Exception:
+                        pass
 
         except Exception as exc:
             log.error(f"Erro ao processar conexão de {peer_addr}: {exc}")

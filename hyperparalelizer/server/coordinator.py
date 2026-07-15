@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from core.network import send_once
 from core.pubsub import TOPIC_GLOBAL_BEST_SCORE
-from hyperparalelizer.global_table import GlobalTable
+from hyperparalelizer.global_table import GlobalTable, ServerState
 from utils.logger import get_logger
 from utils.protocol import MSG_ACK, PubSubPublish, TrainingTask
 
@@ -209,11 +209,12 @@ class Coordinator:
             with self.GlobalTable.lock:
                 self.GlobalTable.fragments_payloads[frag_name] = payload_bytes
 
-            if i < current_peers_count:
-                self.GlobalTable.add_fragment_location(frag_name, all_nodes[i]["node_id"])
+            if current_peers_count > 0:
+                owner_node = all_nodes[i % current_peers_count]
+                self.GlobalTable.add_fragment_location(frag_name, owner_node["node_id"])
 
         with self.GlobalTable.lock:
-            self.GlobalTable.system_state = "DATASET_DISTRIBUTION"
+            self.GlobalTable.system_state = ServerState.DATASET_DISTRIBUTION
 
         return fragment_names
 
@@ -292,14 +293,14 @@ class Coordinator:
 
         if dispatched:
             with self.GlobalTable.lock:
-                self.GlobalTable.system_state = "MODEL_DISTRIBUTION"
+                self.GlobalTable.system_state = ServerState.MODEL_DISTRIBUTION
 
         return dispatched
 
     # DISTRIBUIÇÃO                                                         
     def distribute_dataset(self):
         with self.GlobalTable.lock:
-            self.GlobalTable.system_state = "DATASET_DISTRIBUTION"
+            self.GlobalTable.system_state = ServerState.DATASET_DISTRIBUTION
 
     
     def receive_task_result(self, task_id: str, metrics: Dict[str, Any],) -> Optional[tuple]:
@@ -335,7 +336,12 @@ class Coordinator:
             self.GlobalTable.assigned_tasks.pop(task_id, None)
 
         peer.metrics = metrics
-        new_score = float(metrics.get("f1_score") or 0.0)
+        new_score = float(
+            metrics.get("f1")
+            if metrics.get("f1") is not None
+            else metrics.get("f1_score")
+            or 0.0
+        )
         
         # Obtém o score do melhor modelo atual usando o método thread-safe da GlobalTable
         current_best = self.get_best_model()
@@ -354,7 +360,7 @@ class Coordinator:
                 hyperparameters=task.parametros,
                 metrics=dict(metrics),
                 f1_score=new_score,
-                model_bytes=metrics["model_bytes"],
+                model_bytes=metrics.get("model_bytes", b""),
             )
 
         if is_new_best and self._pubsub_queue is not None:
@@ -378,15 +384,15 @@ class Coordinator:
 
         return peer, task
 
-    def replicate_state_to_pupil(self):
+    async def replicate_state_to_pupil(self) -> bool:
         pupil_peer = getattr(self, 'pupil_peer', None)
         if not isinstance(pupil_peer, dict):
-            return
+            return False
 
         ip = pupil_peer.get('ip')
         port = pupil_peer.get('port')
         if ip is None or port is None:
-            return
+            return False
 
         # Pega o snapshot completo diretamente da GlobalTable (stateless)
         msg = {
@@ -395,4 +401,5 @@ class Coordinator:
             "global_table_snapshot": self.GlobalTable.get_snapshot()
         }
 
-        asyncio.create_task(send_once(ip, port, msg, expect_reply=False))
+        await send_once(ip, port, msg, expect_reply=False)
+        return True

@@ -1,5 +1,5 @@
 import asyncio
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 from core.network import send_once, send_message
 from utils.logger import get_logger
 
@@ -11,6 +11,10 @@ class BullyElection:
         self.peers = globaltable_peers  # Dicionário de peers ativos vindos da réplica da GlobalTable
         self.promote_callback = promote_callback # Função a rodar se este nó vencer
         self.election_in_progress = False
+
+        self.current_coordinator_id: Optional[str] = None
+        self.current_coordinator_ip: Optional[str] = None
+        self.current_coordinator_port: Optional[int] = None
 
     async def detect_timeout_and_start(self):
         """Invocado quando o KeepAlive falha com o coordenador."""
@@ -73,4 +77,13 @@ class BullyElection:
         new_coord = msg.get("id_node")
         print(f"[Bully] Novo coordenador estabelecido: {new_coord}")
         self.election_in_progress = False
-        # Atualiza o endereço do middleware na rede P2P
+
+        self.current_coordinator_id = new_coord
+
+        info = self.peers.get(new_coord) if new_coord is not None else None
+        if info is not None:
+            self.current_coordinator_ip = info.get("ip")
+            self.current_coordinator_port = info.get("port")
+        else:
+            self.current_coordinator_ip = None
+            self.current_coordinator_port = None

@@ -21,12 +21,13 @@ class PeerMessenger:
         node_id: str,
         server_ip: str,
         server_port: int,
-        loop: asyncio.AbstractEventLoop,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
         self.node_id = node_id
         self.server_ip = server_ip
         self.server_port = server_port
         self.loop = loop
+        self._ensure_loop()
 
         self.trainer = None  # setado via attach_trainer()
 
@@ -38,6 +39,19 @@ class PeerMessenger:
 
     def attach_trainer(self, trainer) -> None:
         self.trainer = trainer
+
+    def _ensure_loop(self) -> None:
+        if self.loop is not None:
+            return
+
+        try:
+            self.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                self.loop = asyncio.get_event_loop_policy().get_event_loop()
+            except RuntimeError:
+                self.loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self.loop)
 
     def register_handlers(self, p2p_node: P2PNode) -> None:
         """Registra mensagens vindas do servidor"""
@@ -75,6 +89,10 @@ class PeerMessenger:
 
     def start(self) -> None:
         """Inicia a thread que consome a fila"""
+        self._ensure_loop()
+        if self.loop is None or not self.loop.is_running():
+            raise RuntimeError("PeerMessenger requires a running event loop")
+
         self._stop_event.clear()
         self._outbound_thread = threading.Thread(
             target=self._outbound_worker,
