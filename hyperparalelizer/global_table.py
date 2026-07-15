@@ -3,27 +3,29 @@
 import hashlib
 import threading
 from enum import Enum
+from dataclasses import asdict
 
 class ServerState(Enum):
     HASHING = 0
     OPEN = 1
+    DATASET_DISTRIBUTION = 2
+    MODEL_DISTRIBUTION = 3
 
 class GlobalTable:
     def __init__(self, snapshot=None):
         self.lock = threading.Lock() # garante que duas threads nao modifiquem a GlobalTable ao mesmo tempo
-
+        
+        self.nodes = {} # tabela para mapear: hash(IP+Porta) -> Metadados do Nó
+        self.fragments_payloads = {} # Conteudo Real do Fragmento
+        self.fragments_locations = {} # Localizacao do Fragmentos na rede de peers
+        self.system_state = ServerState.HASHING
+        self.best_model = None
+        self.task_pool = []
+        self.assigned_tasks = {} # task_id -> {node_id, task, timestamp}
+        
         if snapshot is not None:
             self.overwrite_from_snapshot(snapshot)
             return
-        
-        self.nodes = {} # tabela para mapear: hash(IP+Porta) -> Metadados do Nó
-        #self.server_state = ServerState('HASHING')
-        self.fragments_dataset = {} # tabela para mapear: hash(Nome do Fragmento) -> lista de IPs/IDs
-        self.best_model = None
-
-        self.task_pool = []
-        self.assigned_tasks = {}      # task_id -> {node_id, task, timestamp}
-        
         
     def set_best_model(self, model_data):
         with self.lock:
@@ -37,24 +39,78 @@ class GlobalTable:
     def get_snapshot(self):
         """Retorna uma cópia limpa de todo o estado para enviar ao pupilo."""
         with self.lock:
+            # Serializa os nós (Convertendo Peer em dicionário)
+            nodes_serialized = {}
+            for k, v in self.nodes.items():
+                node_copy = v.copy()
+                if hasattr(node_copy.get("metadata"), "__dataclass_fields__"):
+                    node_copy["metadata"] = asdict(node_copy["metadata"])
+                nodes_serialized[k] = node_copy
+
+
+            # Serializa a fila de tarefas (Convertendo TrainningTask em dicionário)
+            task_pool_serialized = [
+                t.to_dict() if hasattr(t, "to_dict") else t 
+                for t in self.task_pool
+            ]
+
+            # Serializa as tarefas atribuídas 
+            assigned_tasks_serialized = {}
+            for k, v in self.assigned_tasks.items():
+                task_info = v.copy()
+                if hasattr(task_info.get("peer"), "__dataclass_fields__"):
+                    task_info["peer"] = asdict(task_info["peer"])
+                if hasattr(task_info.get("task"), "to_dict"):
+                    task_info["task"] = task_info["task"].to_dict()
+                assigned_tasks_serialized[k] = task_info
+
             return {
-                "nodes": self.nodes.copy(),
-                "fragments": self.fragments.copy(),
-                "system_state": self.system_state,
+                "nodes": nodes_serialized,
+                "fragments_payloads": self.fragments_payloads.copy(),
+                "fragments_locations": {k: list(v) for k, v in self.fragments_locations.items()},
+                "system_state": self.system_state if isinstance(self.system_state, str) else str(self.system_state),
                 "best_model": self.best_model.copy() if self.best_model else None,
-                "task_pool": list(self.task_pool),
-                "assigned_tasks": self.assigned_tasks.copy()
+                "task_pool": task_pool_serialized,
+                "assigned_tasks": assigned_tasks_serialized.copy()
             }
         
     def overwrite_from_snapshot(self, snapshot):
         """Usado pelo pupilo para assumir o estado se o mestre cair."""
+        from hyperparalelizer.server.coordinator import Peer
+        from utils.protocol import from_dict
+        
+        # Reconstruir nos (dicionario para Peer)
         with self.lock:
-            self.nodes = snapshot.get("nodes", {})
-            self.fragments = snapshot.get("fragments", {})
+            self.nodes = {}
+            for k, v in snapshot.get("nodes", {}).items():
+                node_data = v.copy()
+                if isinstance(node_data.get("metadata"), dict):
+                    node_data["metadata"] = Peer(**node_data["metadata"])
+                self.nodes[k] = node_data
+
+            self.fragments_payloads = snapshot.get("fragments_payloads", {})
+            self.fragments_locations = snapshot.get("fragments_locations", {})
             self.system_state = snapshot.get("system_state", "HASHING")
             self.best_model = snapshot.get("best_model", None)
-            self.task_pool = snapshot.get("task_pool", [])
-            self.assigned_tasks = snapshot.get("assigned_tasks", {})
+
+            # Reconstruir task_pool (dicionario para TrainningTask)
+            self.task_pool = []
+            for t in snapshot.get("task_pool", []):
+                if isinstance(t, dict) and "type" in t:
+                    self.task_pool.append(from_dict(t))
+                else:
+                    self.task_pool.append(t)
+
+            # Reconstruir assigned_tasks (dicionario para Peer e TrainningTask)
+            self.assigned_tasks = {}
+            for k, v in snapshot.get("assigned_tasks", {}).items():
+                task_info = v.copy()
+                if isinstance(task_info.get("peer"), dict):
+                    task_info["peer"] = Peer(**task_info["peer"])
+                if isinstance(task_info.get("task"), dict) and "type" in task_info["task"]:
+                    task_info["task"] = from_dict(task_info["task"])
+                self.assigned_tasks[k] = task_info
+
 
     # gera o hash sha256 dado o ip + porta ou nome do fragmento
     def generate_hash(self, key_string):
@@ -91,25 +147,23 @@ class GlobalTable:
             if node_id in self.nodes:
                 del self.nodes[node_id]
             
-            # 2. Remove o nó de todos os fragmentos que ele possuía
-            for frag_id in self.fragments_dataset:
-                if node_id in self.fragments_dataset[frag_id]:
-                    self.fragments_dataset[frag_id].remove(node_id)
+            # 2. Remove o nó de todas as localizações de fragmentos
+            for fragment_name in self.fragments_locations:
+                if node_id in self.fragments_locations[fragment_name]:
+                    self.fragments_locations[fragment_name].remove(node_id)
 
     # adiciona a localização de um fragmento (nome do fragmento) associada a um nó (node_id)
     def add_fragment_location(self, fragment_name, node_id):
-        frag_id = self.generate_hash(fragment_name)
         
         with self.lock:
-            if frag_id not in self.fragments_dataset:
-                self.fragments_dataset[frag_id] = []
+            if fragment_name not in self.fragments_locations:
+                self.fragments_locations[fragment_name] = []
             
             # evita de dois nos terem o mesmo fragmento repetido na lista
-            if node_id not in self.fragments_dataset[frag_id]:
-                self.fragments_dataset[frag_id].append(node_id)
+            if node_id not in self.fragments_locations[fragment_name]:
+                self.fragments_locations[fragment_name].append(node_id)
             
     # endpoint para obter as localizações de um fragmento dado seu nome
     def get_fragment_locations(self, fragment_name):
-        frag_id = self.generate_hash(fragment_name)
         with self.lock:
-            return self.fragments_dataset.get(frag_id, [])
+            return self.fragments_locations.get(fragment_name, [])

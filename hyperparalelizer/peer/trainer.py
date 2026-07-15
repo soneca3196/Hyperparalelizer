@@ -2,7 +2,6 @@
 
 import asyncio
 import pickle
-import threading
 from typing import Any, Dict, List, Optional
 
 from sklearn.model_selection import train_test_split
@@ -21,7 +20,7 @@ from hyperparalelizer.peer.peer_inner_protocol import (
 from hyperparalelizer.server.coordinator import Coordinator
 from hyperparalelizer.global_table import GlobalTable
 
-from peer.peer_inner_protocol import PupilPromoted
+from hyperparalelizer.peer.peer_inner_protocol import PupilPromoted
 
 log = get_logger("trainer")
 
@@ -141,15 +140,11 @@ class TrainerNode:
 
     # Enviar resultado
 
-    def _send_result(
-        self,
-        task: Dict[str, Any],
-        metrics: Optional[Dict[str, float]],
-        error: Optional[str] = None,
-    ) -> None:
+    def _send_result(self, task: Dict[str, Any], metrics: Optional[Dict[str, float]], error: Optional[str] = None,) -> None:
         message = {
             "type": "TaskResult",
             "task_id": task.get("task_id"),
+            "status": "success" if error is None else "failed",
             "id_node": self.node_id,
             "accuracy": metrics["accuracy"] if metrics else None,
             "precision": metrics["precision"] if metrics else None,

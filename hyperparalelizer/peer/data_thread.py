@@ -24,7 +24,6 @@ class DataThread:
 
     def __init__(
         self,
-        node_id: str,
         ip: str,
         listen_port: int,
         server_ip: str,
@@ -32,7 +31,6 @@ class DataThread:
         storage_dir: str = DEFAULT_STORAGE_DIR,
         event_bus: Optional[InternalEventBus] = None,
     ):
-        self.node_id = node_id
         self.ip = ip
         self.listen_port = listen_port
         self.server_ip = server_ip
@@ -53,11 +51,10 @@ class DataThread:
         self,
         memoria_total_mb: float = 0.0,
         memoria_disponivel_mb: float = 0.0,
-        timeout: float = 15.0,
+        timeout: float = 60.0,
     ) -> Optional[Dict[str, Any]]:
         """Envia JoinNetwork e recebe fragmento + peers conhecidos"""
         msg = JoinNetwork(
-            id_node=self.node_id,
             ip=self.ip,
             porta=self.listen_port,
             memoria_total_mb=memoria_total_mb,
@@ -68,19 +65,42 @@ class DataThread:
             self.server_ip, self.server_port, msg, expect_reply=True, timeout=timeout
         )
 
-        if reply is None or reply.get("type") != MSG_JOIN_ACK:
-            log.error("DataThread: falha ao entrar na rede")
+#        if reply is None or reply.get("type") != MSG_JOIN_ACK:
+#            log.error("DataThread: falha ao entrar na rede")
+#            return None
+#        self.fragment_id = reply.get("fragment_id")
+#        self.known_peers = reply.get("peers", []) or []
+#        self.initial_task = reply.get("task")
+
+        if reply is None:
+            log.error("DataThread: servidor não respondeu ao JoinNetwork")
             return None
 
+        if reply.get("type") != MSG_JOIN_ACK:
+            log.error("DataThread: resposta inesperada no join: "f"{reply.get('type')!r}")
+            return None
+
+        node_id = reply.get("node_id")
+
+        if not isinstance(node_id, str) or not node_id:
+            log.error("DataThread: JoinAck sem node_id válido")
+            return None
+
+        self.node_id = node_id
         self.fragment_id = reply.get("fragment_id")
-        self.known_peers = reply.get("peers", []) or []
+        self.known_peers = reply.get("peers") or []
         self.initial_task = reply.get("task")
 
         log.info(
-            f"DataThread [{self.node_id[:8]}...]: fragmento "
-            f"'{self.fragment_id}', {len(self.known_peers)} peer(s) conhecido(s)"
+            f"DataThread [{self.node_id[:8]}...]: "
+            f"entrada confirmada, "
+            f"fragmento={self.fragment_id}, "
+            f"peers={len(self.known_peers)}, "
+            f"task={self.initial_task.get('task_id') if self.initial_task else None}"
         )
+
         return reply
+
 
     def update_known_peers(self, peers: List[Dict[str, Any]]) -> None:
         """Atualiza a lista de peers conhecidos"""

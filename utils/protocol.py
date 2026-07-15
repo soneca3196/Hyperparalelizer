@@ -8,6 +8,7 @@ import time
 
 # Tipo de mensagem
 MSG_JOIN_NETWORK = "JoinNetwork"
+MSG_JOIN_ACK = "JoinAck"
 MSG_FIND_NODE = "FindNode"
 MSG_KEEP_ALIVE = "KeepAlive"
 MSG_TRAINING_TASK = "TrainingTask"
@@ -28,7 +29,6 @@ MSG_BULLY_ALIVE = "BullyAlive"
 MSG_BULLY_COORDINATOR = "BullyCoordinator"
 MSG_SYNC_STATE = "SyncState"
 MSG_DATASET_READY = "DatasetReady"
-MSG_JOIN_ACK = MSG_ACK  # o servidor confirma JoinNetwork com um Ack genérico
 MSG_REQUEST_FRAGMENT = "RequestFragment"
 MSG_FRAGMENT_DATA = "FragmentData"
 MSG_FRAGMENT_NOT_FOUND = "FragmentNotFound"
@@ -38,7 +38,6 @@ MSG_FRAGMENT_BACKUP = "FragmentBackup"
 
 @dataclass
 class JoinNetwork:
-    id_node: str
     ip: str
     porta: int
     memoria_total_mb: float = 0.0

@@ -16,7 +16,10 @@ from typing import Any, Dict, List, Optional
 from core.network import send_once
 from core.pubsub import TOPIC_GLOBAL_BEST_SCORE
 from hyperparalelizer.global_table import GlobalTable
-from utils.protocol import PubSubPublish, TrainingTask
+from utils.logger import get_logger
+from utils.protocol import MSG_ACK, PubSubPublish, TrainingTask
+
+log = get_logger("coordinator")
 
 TASK_TIMEOUT = 30.0  # segundos até uma tarefa ser considerada perdida
 
@@ -50,45 +53,69 @@ class Coordinator:
         # Referência ao peer pupilo (se existir)
         self.pupil_peer: Optional[Dict[str, Any]] = None
 
-        # Garante a inicialização de atributos que a GlobalTable espera em métodos de snapshot,
-        # mas que não foram declarados em seu construtor original.
-        if not hasattr(self.GlobalTable, 'fragments'):
-            self.GlobalTable.fragments = {}
-        if not hasattr(self.GlobalTable, 'system_state'):
-            self.GlobalTable.system_state = "HASHING"
+    def get_best_model(self) -> Optional[Dict[str, Any]]:
+        best = self.GlobalTable.get_best_model()
+        return dict(best) if best is not None else None
+
+    def update_best_model( self, task_id: str, peer_id: str, hyperparameters: Dict[str, Any], metrics: Dict[str, Any], f1_score: float,) -> None:
+        self.GlobalTable.set_best_model({
+            "task_id": task_id,
+            "peer_id": peer_id,
+            "hyperparameters": dict(hyperparameters),
+            "metrics": dict(metrics),
+            "f1_score": float(f1_score),
+        })
 
     # ENDPOINT: ADICIONA NOVO PEER                                      
-    def add_peer(self, peer: Peer) -> str:
-        # Ao entrar na rede, guardamos a própria instância de Peer como metadata na GlobalTable
-        node_id = self.GlobalTable.add_node(
-            peer.ip, 
-            peer.port, 
-            peer
-        )
+    def add_peer(self, peer: Peer,) -> tuple[str, Optional[str], Optional[TrainingTask]]:
+        """
+        Registra um peer e devolve as informações necessárias para o JoinAck.
+
+        Returns:
+            node_id: ID definitivo do peer.
+            fragment_id: Fragmento inicialmente atribuído ao peer, ou None.
+            task: Primeira tarefa reservada para o peer, ou None.
+        """
+
+        node_id = self.GlobalTable.add_node(peer.ip, peer.port, peer,)
+
         peer.id_node = node_id
 
-        # Recupera fragmentos e nós de forma thread-safe para fazer o round-robin
+        fragment_id: Optional[str] = None
+
         with self.GlobalTable.lock:
-            dataset_fragments = list(self.GlobalTable.fragments.keys())
+            dataset_fragments = list(self.GlobalTable.fragments_payloads.keys())
+
             all_nodes = list(self.GlobalTable.nodes.values())
-            # Determina a posição do peer na lista de nós ativos
-            peer_index = next((i for i, node in enumerate(all_nodes) if node["node_id"] == node_id), 0)
 
-        # Associa um fragmento de dataset ao peer (round-robin)
+            peer_index = next(
+                (
+                    index
+                    for index, node in enumerate(all_nodes)
+                    if node["node_id"] == node_id
+                ),
+                0,
+            )
+
         if dataset_fragments:
-            frag_index = peer_index % len(dataset_fragments)
-            fragment_name = dataset_fragments[frag_index]
-            self.GlobalTable.add_fragment_location(fragment_name, node_id)
+            fragment_index = ( peer_index % len(dataset_fragments))
 
-        # Atribui hiperparâmetros pendentes da fila
-        self.assign_hyperparameters_to_peer(peer)
+            fragment_id = dataset_fragments[fragment_index]
 
-        return node_id
+            # Atenção: idealmente esta localização só deve ser
+            # registrada depois do DatasetReady.
+            # Para não alterar todo o fluxo agora, pode deixar
+            # temporariamente assim.
+            self.GlobalTable.add_fragment_location(fragment_id, node_id,)
+
+        task = self.assign_hyperparameters_to_peer(peer)
+
+        return node_id, fragment_id, task
     
     # GRID SEARCH                                              
     def generate_grid_search(self, hyperparameters: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
         with self.GlobalTable.lock:
-            dataset_fragments = list(self.GlobalTable.fragments.keys())
+            dataset_fragments = list(self.GlobalTable.fragments_payloads.keys())
 
         if not dataset_fragments:
             raise RuntimeError(
@@ -167,7 +194,7 @@ class Coordinator:
             
             # Armazena os dados do fragmento diretamente na tabela global de forma thread-safe
             with self.GlobalTable.lock:
-                self.GlobalTable.fragments[frag_name] = frag_data
+                self.GlobalTable.fragments_payloads[frag_name] = frag_data
 
             # Associa o fragmento ao peer já registrado, se houver
             if i < current_peers_count:
@@ -194,37 +221,76 @@ class Coordinator:
 
         return timed_out_ids
 
-    # DISTRIBUIÇÃO                                                         
-    def distribute_dataset(self):
-        with self.GlobalTable.lock:
-            self.GlobalTable.system_state = "DATASET_DISTRIBUTION"
+    # DESPACHO DE TAREFAS
 
-    def distribute_model_and_hyperparameters(self) -> List[tuple]:
+    async def dispatch_next_task(self, peer: Peer) -> bool:
+        """Reserva a próxima tarefa da fila e envia ao peer via TCP.
+
+        Se o envio falhar (sem resposta ou Ack inválido), a tarefa é
+        devolvida ao início de task_pool para ser reatribuída.
+        Retorna True se a tarefa foi aceita pelo peer.
+        """
+        task = self.assign_hyperparameters_to_peer(peer)
+        if task is None:
+            return False  # fila vazia
+
+        reply = await send_once(
+            peer.ip,
+            peer.port,
+            task.to_dict(),
+            expect_reply=True,
+        )
+
+        if reply is None or reply.get("type") != MSG_ACK:
+            # rollback: devolve a tarefa ao início da fila
+            with self.GlobalTable.lock:
+                self.GlobalTable.assigned_tasks.pop(task.task_id, None)
+                peer.hyperparameters = {}
+                self.GlobalTable.task_pool.insert(0, task)
+            log.warning(
+                f"dispatch_next_task: peer {peer.id_node[:8]}… "
+                f"({peer.ip}:{peer.port}) não confirmou "
+                f"tarefa {task.task_id[:8]}…, recolocada na fila"
+            )
+            return False
+
+        log.info(
+            f"dispatch_next_task: tarefa {task.task_id[:8]}… "
+            f"enviada para {peer.id_node[:8]}… ({peer.ip}:{peer.port})"
+        )
+        return True
+
+    async def dispatch_all_idle(self) -> List[str]:
+        """Envia tarefas para todos os peers ociosos. Retorna lista de node_ids que receberam tarefa com sucesso."""
         with self.GlobalTable.lock:
             busy_ids = {entry["peer"].id_node for entry in self.GlobalTable.assigned_tasks.values()}
             all_nodes = list(self.GlobalTable.nodes.values())
-            
-            # Extrai os peers ociosos diretamente do metadata armazenado na tabela
-            idle_peers = [node["metadata"] for node in all_nodes if node["node_id"] not in busy_ids]
 
-        dispatched: List[tuple] = []
+        idle_peers = [node["metadata"] for node in all_nodes if node["node_id"] not in busy_ids]
+
+        dispatched: List[str] = []
         for peer in idle_peers:
-            task = self.assign_hyperparameters_to_peer(peer)
-            if task is None:
-                break  # Fila de tarefas vazia
-            dispatched.append((peer, task))
+            with self.GlobalTable.lock:
+                has_tasks = bool(self.GlobalTable.task_pool)
+            if not has_tasks:
+                break
+            ok = await self.dispatch_next_task(peer)
+            if ok:
+                dispatched.append(peer.id_node)
 
         if dispatched:
             with self.GlobalTable.lock:
                 self.GlobalTable.system_state = "MODEL_DISTRIBUTION"
 
         return dispatched
+
+    # DISTRIBUIÇÃO                                                         
+    def distribute_dataset(self):
+        with self.GlobalTable.lock:
+            self.GlobalTable.system_state = "DATASET_DISTRIBUTION"
+
     
-    def receive_task_result(
-        self,
-        task_id: str,
-        metrics: Dict[str, Any],
-    ) -> Optional[tuple]:
+    def receive_task_result(self, task_id: str, metrics: Dict[str, Any],) -> Optional[tuple]:
         is_new_best = False
 
         with self.GlobalTable.lock:
@@ -240,19 +306,19 @@ class Coordinator:
         new_score = float(metrics.get("f1_score", 0.0))
         
         # Obtém o score do melhor modelo atual usando o método thread-safe da GlobalTable
-        current_best_model = self.GlobalTable.get_best_model()
-        current_best_score = current_best_model["f1_score"] if current_best_model else -1.0
+        current_best = self.get_best_model()
+        current_best_score = current_best.get("f1_score", -1.0) if current_best is not None else -1.0
 
         if new_score > current_best_score:
             is_new_best = True
             # Salva o melhor modelo de forma centralizada
-            self.GlobalTable.set_best_model({
-                "task_id": task_id,
-                "peer_id": peer.id_node,
-                "hyperparameters": task.parametros,
-                "metrics": dict(metrics),
-                "f1_score": new_score,
-            })
+            self.update_best_model(
+                task_id=task_id,
+                peer_id=peer.id_node,
+                hyperparameters=task.parametros,
+                metrics=dict(metrics),
+                f1_score=new_score,
+            )
             
         if is_new_best and self._pubsub_queue is not None:
             publish_msg = PubSubPublish(

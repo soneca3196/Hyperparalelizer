@@ -40,33 +40,79 @@ from utils.protocol import (
     MSG_REQUEST_BEST,
     MSG_TASK_RESULT,
     Ack,
+    JoinAck,
     SendBestModel,
 )
 
 log = get_logger("server_peer_protocol")
 
 # JoinNetwork                                                     
-async def handle_join_network(
-    msg: Dict[str, Any],
-    writer: asyncio.StreamWriter,
-    coordinator: Coordinator,
-    status_queue: Optional[asyncio.Queue] = None,
-) -> str:
-    peer = Peer(ip=msg["ip"], port=msg["porta"])
-    node_id = coordinator.add_peer(peer)
+async def handle_join_network(msg: Dict[str, Any], writer: asyncio.StreamWriter, coordinator: Coordinator, status_queue: Optional[asyncio.Queue] = None,) -> str:
+    ip = msg.get("ip")
+    port = msg.get("porta")
 
-    ack = Ack(ref_type=MSG_JOIN_NETWORK, ref_id=node_id)
-    await send_message(writer, ack.to_dict())
+    if not ip or not isinstance(port, int):
+        await send_message(
+            writer,
+            {
+                "type": "Error",
+                "code": "INVALID_JOIN_REQUEST",
+                "detail": "Os campos ip e porta são obrigatórios.",
+            },
+        )
+        return ""
+
+    peer = Peer(ip=ip, port=port,)
+    node_id, fragment_id, task = (coordinator.add_peer(peer))
+
+    # Lista apenas estruturas simples, serializáveis em JSON.
+    known_peers = []
+
+    for node in coordinator.GlobalTable.get_all_nodes():
+        other_node_id = node.get("node_id")
+
+        if other_node_id == node_id:
+            continue
+
+        known_peers.append(
+            {
+                "id_node": other_node_id,
+                "ip": node.get("ip"),
+                "port": node.get("port"),
+            }
+        )
+
+    response = JoinAck(node_id=node_id, fragment_id=fragment_id, peers=known_peers, task=task.to_dict() 
+                       if task else None,)
+
+    await send_message(writer, response.to_dict(),)
 
     if status_queue is not None:
-        await status_queue.put({
-            "event": "peer_joined",
-            "node_id": node_id,
-            "ip": msg["ip"],
-            "port": msg["porta"],
-        })
+        await status_queue.put(
+            {
+                "event": "peer_joined",
+                "node_id": node_id,
+                "ip": ip,
+                "port": port,
+                "fragment_id": fragment_id,
+                "task_id": (
+                    task.task_id
+                    if task is not None
+                    else None
+                ),
+            }
+        )
 
-    log.info(f"JoinNetwork: peer registrado {node_id[:8]}… ({msg['ip']}:{msg['porta']})")
+    log.info(
+        f"JoinNetwork: peer registrado "
+        f"{node_id[:8]}… ({ip}:{port}), "
+        f"fragmento={fragment_id}, "
+        f"task={task.task_id if task else None}"
+    )
+    # Dispacha a tarefa reservada para o peer recém-registrado
+    if task is not None:
+        asyncio.create_task(coordinator.dispatch_next_task(peer))
+
     return node_id
 
 # TaskResult                                                         
@@ -85,9 +131,10 @@ async def handle_task_result(
 
     if result is not None:
         peer, task = result
+        best_model = coordinator.get_best_model()
         is_new_best = (
-            coordinator.best_model is not None
-            and coordinator.best_model.get("task_id") == task_id
+            best_model is not None
+            and best_model.get("task_id") == task_id
         )
         if status_queue is not None:
             await status_queue.put({
@@ -102,6 +149,8 @@ async def handle_task_result(
             f"f1={msg.get('f1_score', 0.0):.4f}"
             + (" [NOVO MELHOR]" if is_new_best else "")
         )
+        # peer fica livre: despacha próxima tareda imediatamente
+        asyncio.create_task(coordinator.dispatch_next_task(peer))
     else:
         log.warning(f"TaskResult: task_id desconhecido '{task_id}'")
 
@@ -114,7 +163,7 @@ async def handle_request_best_model(
 ) -> None:
     #Roteado por: ServerMessenger → MSG_REQUEST_BEST
     requester_id = msg.get("id_node", "")
-    best = coordinator.best_model
+    best = coordinator.get_best_model()
 
     if best is None:
         await send_message(writer, {
