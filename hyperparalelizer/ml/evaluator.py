@@ -42,7 +42,7 @@ def evaluate(true, pred, prob=None) -> dict:
     metrics["accuracy"] = accuracy_score(true, pred)
     metrics["precision"] = precision_score(true, pred, average=avg, zero_division=0)
     metrics["recall"] = recall_score(true, pred, average=avg, zero_division=0)
-    metrics["f1"] = f1_score(true, pred, average=avg, zero_division=0)
+    metrics["f1_score"] = f1_score(true, pred, average=avg, zero_division=0)
 
     if prob is not None:
         try:
