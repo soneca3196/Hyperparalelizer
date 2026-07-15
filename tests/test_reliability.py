@@ -65,6 +65,42 @@ def test_send_once_retries_then_succeeds():
     asyncio.run(run_test())
 
 
+def test_receive_task_result_failed_requeues_task_and_clears_assignment():
+    table = GlobalTable()
+    coordinator = Coordinator(dataset=([0, 1], [0, 1]), model=None, global_table=table)
+
+    peer = Peer(ip="127.0.0.1", port=9001)
+    node_id = table.add_node(peer.ip, peer.port, peer)
+    peer.id_node = node_id
+
+    task = TrainingTask(
+        task_id="task-2",
+        id_node_origem="server",
+        dataset_fragmentos=["fragment_0000"],
+        parametros={"C": 1.0},
+        model_type="generic",
+    )
+
+    with table.lock:
+        table.assigned_tasks[task.task_id] = {
+            "peer": peer,
+            "timestamp": 0.0,
+            "task": task,
+        }
+
+    result = coordinator.receive_task_result(
+        task.task_id,
+        {"status": "failed", "error": "boom"},
+    )
+
+    assert result == (peer, task)
+
+    with table.lock:
+        assert task in table.task_pool
+        assert task.task_id not in table.assigned_tasks
+        assert peer.hyperparameters == {}
+
+
 def test_handle_peer_failure_requeues_task_and_removes_peer():
     table = GlobalTable()
     coordinator = Coordinator(dataset=([0, 1], [0, 1]), model=None, global_table=table)

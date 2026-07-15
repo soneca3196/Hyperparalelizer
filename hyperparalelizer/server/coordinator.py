@@ -377,6 +377,7 @@ class Coordinator:
         failed = metrics.get("status") == "failed" or metrics.get("error") is not None
         if failed:
             with self.GlobalTable.lock:
+                self.GlobalTable.assigned_tasks.pop(task_id, None)
                 self.GlobalTable.task_pool.insert(0, task)
             peer.hyperparameters = {}
             log.warning(
