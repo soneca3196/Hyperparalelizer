@@ -244,10 +244,10 @@ class MaekawaRelease:
 
 @dataclass
 class SyncState:
-    id_node: str # id do servidor
+    id_node: str  # id do servidor
     global_table_snapshot: dict
-    task_queue_snapshot: list
-    best_model_metrics: dict
+    task_queue_snapshot: list = field(default_factory=list)
+    best_model_metrics: dict = field(default_factory=dict)
     type: str = field(default=MSG_SYNC_STATE, init=False)
     def to_dict(self): return asdict(self)
 

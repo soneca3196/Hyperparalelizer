@@ -35,11 +35,14 @@ from core.network import send_message
 from hyperparalelizer.server.coordinator import Coordinator, Peer
 from utils.logger import get_logger
 from utils.protocol import (
+    MSG_DATASET_READY,
     MSG_JOIN_NETWORK,
     MSG_KEEP_ALIVE,
     MSG_REQUEST_BEST,
+    MSG_REQUEST_FRAGMENT_BACKUP,
     MSG_TASK_RESULT,
     Ack,
+    FragmentBackupData,
     JoinAck,
     SendBestModel,
 )
@@ -131,9 +134,12 @@ async def handle_task_result(
 
     if result is not None:
         peer, task = result
+        failed = msg.get("status") == "failed" or msg.get("error") is not None
+        f1_score = msg.get("f1_score") if not failed else None
         best_model = coordinator.get_best_model()
         is_new_best = (
-            best_model is not None
+            not failed
+            and best_model is not None
             and best_model.get("task_id") == task_id
         )
         if status_queue is not None:
@@ -141,15 +147,22 @@ async def handle_task_result(
                 "event": "task_result",
                 "task_id": task_id,
                 "peer_id": peer.id_node,
-                "f1_score": msg.get("f1_score", 0.0),
+                "status": "failed" if failed else "success",
+                "f1_score": f1_score,
                 "is_new_best": is_new_best,
             })
-        log.info(
-            f"TaskResult de {peer.id_node[:8]}… — "
-            f"f1={msg.get('f1_score', 0.0):.4f}"
-            + (" [NOVO MELHOR]" if is_new_best else "")
-        )
-        # peer fica livre: despacha próxima tareda imediatamente
+        if failed:
+            log.info(
+                f"TaskResult de {peer.id_node[:8]}… — FALHOU "
+                f"({msg.get('error')}), tarefa reenfileirada"
+            )
+        else:
+            log.info(
+                f"TaskResult de {peer.id_node[:8]}… — "
+                f"f1={(f1_score or 0.0):.4f}"
+                + (" [NOVO MELHOR]" if is_new_best else "")
+            )
+        # peer fica livre: despacha próxima tarefa imediatamente
         asyncio.create_task(coordinator.dispatch_next_task(peer))
     else:
         log.warning(f"TaskResult: task_id desconhecido '{task_id}'")
@@ -202,6 +215,85 @@ async def handle_request_best_model(
         f"enviado (f1={best.get('f1_score', 0.0):.4f})"
     )
 
+# DatasetReady                                                        
+async def handle_dataset_ready(
+    msg: Dict[str, Any],
+    writer: asyncio.StreamWriter,
+    coordinator: Coordinator,
+    status_queue: Optional[asyncio.Queue] = None,
+) -> None:
+    """
+    O servidor considera que o peer realmente possui o fragmento em disco a partir daqui
+    """
+    node_id = msg.get("id_node", "")
+    fragment_id = msg.get("fragment_id", "")
+
+    if not node_id or not fragment_id:
+        await send_message(writer, {
+            "type": "Error",
+            "code": "INVALID_DATASET_READY",
+            "detail": "id_node e fragment_id são obrigatórios.",
+        })
+        return
+
+    coordinator.GlobalTable.add_fragment_location(fragment_id, node_id)
+
+    ack = Ack(ref_type=MSG_DATASET_READY, ref_id=fragment_id)
+    await send_message(writer, ack.to_dict())
+
+    if status_queue is not None:
+        await status_queue.put({
+            "event": "dataset_ready",
+            "node_id": node_id,
+            "fragment_id": fragment_id,
+        })
+
+    log.info(
+        f"DatasetReady: {node_id[:8]}… confirmou posse de '{fragment_id}'"
+    )
+
+# RequestFragmentBackup                                               
+async def handle_request_fragment_backup(
+    msg: Dict[str, Any],
+    writer: asyncio.StreamWriter,
+    coordinator: Coordinator,
+    status_queue: Optional[asyncio.Queue] = None,
+) -> None:
+    """
+    Quando um peer não encontra o fragmento em nenhum outro peer
+    """
+    requester = msg.get("id_node", "")
+    fragment_id = msg.get("fragment_id", "")
+
+    payload = coordinator.GlobalTable.fragments_payloads.get(fragment_id)
+
+    if payload is None:
+        log.warning(
+            f"RequestFragmentBackup: '{fragment_id}' não existe no servidor "
+            f"(pedido de {requester[:8] if requester else '?'}…)"
+        )
+        await send_message(writer, {
+            "type": "Error",
+            "code": "FRAGMENT_NOT_FOUND",
+            "detail": fragment_id,
+        })
+        return
+
+    reply = FragmentBackupData(id_node=requester, fragment_id=fragment_id, data=payload)
+    await send_message(writer, reply.to_dict())
+
+    if status_queue is not None:
+        await status_queue.put({
+            "event": "fragment_backup_served",
+            "requester_id": requester,
+            "fragment_id": fragment_id,
+        })
+
+    log.info(
+        f"RequestFragmentBackup: '{fragment_id}' ({len(payload)} bytes) "
+        f"enviado para {requester[:8] if requester else '?'}…"
+    )
+
 # KeepAlive                                                       
 async def handle_keep_alive(
     msg: Dict[str, Any],
@@ -222,10 +314,12 @@ def register_all_handlers(
 ) -> None:
     # Registra todos os handlers de protocolo no ServerMessenger, substituindoos handlers built-in definidos em ServerMessenger.__init__.
     bindings = [
-        (MSG_JOIN_NETWORK, handle_join_network),
-        (MSG_TASK_RESULT,  handle_task_result),
-        (MSG_REQUEST_BEST, handle_request_best_model),
-        (MSG_KEEP_ALIVE,   handle_keep_alive),
+        (MSG_JOIN_NETWORK,           handle_join_network),
+        (MSG_TASK_RESULT,            handle_task_result),
+        (MSG_REQUEST_BEST,           handle_request_best_model),
+        (MSG_KEEP_ALIVE,             handle_keep_alive),
+        (MSG_DATASET_READY,          handle_dataset_ready),
+        (MSG_REQUEST_FRAGMENT_BACKUP, handle_request_fragment_backup),
     ]
     for msg_type, handler_fn in bindings:
         # functools.partial vincula coordinator e status_queue,

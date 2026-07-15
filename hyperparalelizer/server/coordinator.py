@@ -7,6 +7,7 @@
 import asyncio
 import itertools
 import math
+import pickle
 import queue
 import time
 import uuid
@@ -166,7 +167,7 @@ class Coordinator:
     def fragment_dataset(self, n_fragments: Optional[int] = None) -> List[str]:
         """
         Divide self.dataset em n_fragments partes e registra cada fragmento
-        na GlobalTable associado ao peer correspondente (se já houver peers)
+        na GlobalTable
         """
         with self.GlobalTable.lock:
             all_nodes = list(self.GlobalTable.nodes.values())
@@ -179,24 +180,34 @@ class Coordinator:
         if n_fragments <= 0:
             raise ValueError("n_fragments deve ser maior que zero.")
 
-        total = len(self.dataset)
+        try:
+            X_full, y_full = self.dataset
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "self.dataset deve ser uma tupla (X, y) com X e y do mesmo "
+                "tamanho, prontos para fragmentação."
+            ) from exc
+
+        total = len(X_full)
         if total == 0:
             raise ValueError("dataset está vazio.")
+        if len(y_full) != total:
+            raise ValueError("X e y do dataset possuem tamanhos diferentes.")
 
         fragment_size = math.ceil(total / n_fragments)
         fragment_names: List[str] = []
         
-        # O tamanho dos fragmentos é calculado de forma aproximadamente uniforme
         for i in range(n_fragments):
-            frag_data = self.dataset[i * fragment_size: (i + 1) * fragment_size]
+            X_frag = X_full[i * fragment_size: (i + 1) * fragment_size]
+            y_frag = y_full[i * fragment_size: (i + 1) * fragment_size]
             frag_name = f"fragment_{i:04d}"
             fragment_names.append(frag_name)
-            
-            # Armazena os dados do fragmento diretamente na tabela global de forma thread-safe
-            with self.GlobalTable.lock:
-                self.GlobalTable.fragments_payloads[frag_name] = frag_data
 
-            # Associa o fragmento ao peer já registrado, se houver
+            payload_bytes = pickle.dumps({"X": X_frag, "y": y_frag})
+
+            with self.GlobalTable.lock:
+                self.GlobalTable.fragments_payloads[frag_name] = payload_bytes
+
             if i < current_peers_count:
                 self.GlobalTable.add_fragment_location(frag_name, all_nodes[i]["node_id"])
 
@@ -291,6 +302,10 @@ class Coordinator:
 
     
     def receive_task_result(self, task_id: str, metrics: Dict[str, Any],) -> Optional[tuple]:
+        """
+        `metrics` é o TaskResult inteiro recebido do peer (dict), incluindo
+        os campos "status" e "error" quando o treino falhou.
+        """
         is_new_best = False
 
         with self.GlobalTable.lock:
@@ -301,9 +316,21 @@ class Coordinator:
 
         peer = task_info["peer"]
         task = task_info["task"]
+
+        failed = metrics.get("status") == "failed" or metrics.get("error") is not None
+        if failed:
+            with self.GlobalTable.lock:
+                self.GlobalTable.task_pool.insert(0, task)
+            peer.hyperparameters = {}
+            log.warning(
+                f"receive_task_result: tarefa {task_id[:8]}… falhou no peer "
+                f"{peer.id_node[:8]}… ({metrics.get('error')}), reenfileirada"
+            )
+            return peer, task
+
         peer.metrics = metrics
 
-        new_score = float(metrics.get("f1_score", 0.0))
+        new_score = float(metrics.get("f1_score") or 0.0)
         
         # Obtém o score do melhor modelo atual usando o método thread-safe da GlobalTable
         current_best = self.get_best_model()
