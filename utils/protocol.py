@@ -336,6 +336,7 @@ _TYPE_MAP = {
     MSG_PUBSUB_SUBSCRIBE: PubSubSubscribe,
     MSG_PUBSUB_UNSUBSCRIBE: PubSubUnsubscribe,  # added
     MSG_PUBSUB_PUBLISH: PubSubPublish,
+    MSG_PUBSUB_NOTIFY: PubSubNotify,
     MSG_ACK: Ack,
     MSG_ERROR: ErrorMsg,
     MSG_MAEKAWA_REQUEST: MaekawaRequest,
