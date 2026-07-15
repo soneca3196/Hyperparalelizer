@@ -52,7 +52,7 @@ class TrainerNode:
         task_id_raw = task.get("task_id")
         if not isinstance(task_id_raw, str) or not task_id_raw:
             log.error(f"[Trainer {self.node_id[:8]}...] task_id ausente ou inválido")
-            self._send_result(task, metrics=None, error="invalid_task")
+            self._send_result(task, metrics=None, model_bytes=None, error="invalid_task")
             return
 
         task_id = task_id_raw
@@ -65,7 +65,7 @@ class TrainerNode:
         ok = await self.data_thread.assemble_many(fragment_ids)
         if not ok:
             log.error(f"[Trainer {self.node_id[:8]}...] dataset indisponível para '{task_id}'")
-            self._send_result(task, metrics=None, error="dataset_unavailable")
+            self._send_result(task, metrics=None, model_bytes=None ,error="dataset_unavailable")
             self._emit(TrainingFailed(task_id=task_id, node_id=self.node_id, error="dataset_unavailable"))
             return
 
@@ -77,20 +77,20 @@ class TrainerNode:
         
         try:
             # Retorna as métricas e um booleano dizendo se quebrou o recorde
-            metrics, is_new_best = await loop.run_in_executor(None, self._train_task, task, fragment_ids, task_id)
+            metrics, is_new_best, model_bytes = await loop.run_in_executor(None, self._train_task, task, fragment_ids, task_id)
         except Exception as exc:
             log.error(f"[Trainer {self.node_id[:8]}...] erro durante treino: {exc}")
-            self._send_result(task, metrics=None, error=str(exc))
+            self._send_result(task, metrics=None, model_bytes=None,error=str(exc))
             self._emit(TrainingFailed(task_id=task_id, node_id=self.node_id, error=str(exc)))
             return
 
         # LOGICA DO MAEKAWA: Protege o envio se for um novo melhor modelo
         if is_new_best:
             await self.maekawa_mutex.request_access()
-            self._send_result(task, metrics=metrics)
+            self._send_result(task, metrics=metrics, model_bytes=model_bytes)
             await self.maekawa_mutex.release_access()
         else:
-            self._send_result(task, metrics=metrics)
+            self._send_result(task, metrics=metrics, model_bytes=model_bytes)
 
         self._emit(TrainingFinished(task_id=task_id, node_id=self.node_id, metrics=metrics or {}))
 
@@ -115,6 +115,7 @@ class TrainerNode:
 
         model = get_model(task["model_type"], task["parametros"])
         model.fit(X_train, y_train)
+        serialized_model = pickle.dumps(model)
 
         y_pred = model.predict(X_test)
         y_prob = model.predict_proba(X_test)
@@ -136,11 +137,11 @@ class TrainerNode:
                 )
             )
 
-        return metrics, is_new_best
+        return metrics, is_new_best, serialized_model
 
     # Enviar resultado
 
-    def _send_result(self, task: Dict[str, Any], metrics: Optional[Dict[str, float]], error: Optional[str] = None,) -> None:
+    def _send_result(self, task: Dict[str, Any], metrics: Optional[Dict[str, float]], model_bytes: Optional[bytes] = None, error: Optional[str] = None,) -> None:
         message = {
             "type": "TaskResult",
             "task_id": task.get("task_id"),
@@ -151,6 +152,7 @@ class TrainerNode:
             "recall": metrics["recall"] if metrics else None,
             "f1_score": metrics["f1"] if metrics else None,
             "roc_auc": metrics["roc_auc"] if metrics else None,
+            "model_bytes": model_bytes,
             "error": error,
         }
         self.messenger.send(message)

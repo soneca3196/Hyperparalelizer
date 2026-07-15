@@ -57,13 +57,14 @@ class Coordinator:
         best = self.GlobalTable.get_best_model()
         return dict(best) if best is not None else None
 
-    def update_best_model( self, task_id: str, peer_id: str, hyperparameters: Dict[str, Any], metrics: Dict[str, Any], f1_score: float,) -> None:
+    def update_best_model( self, task_id: str, peer_id: str, hyperparameters: Dict[str, Any], metrics: Dict[str, Any], f1_score: float, model_bytes: bytes,) -> None:
         self.GlobalTable.set_best_model({
             "task_id": task_id,
             "peer_id": peer_id,
             "hyperparameters": dict(hyperparameters),
             "metrics": dict(metrics),
             "f1_score": float(f1_score),
+            "model_bytes": model_bytes,
         })
 
     # ENDPOINT: ADICIONA NOVO PEER                                      
@@ -293,33 +294,69 @@ class Coordinator:
     def receive_task_result(self, task_id: str, metrics: Dict[str, Any],) -> Optional[tuple]:
         is_new_best = False
 
+        # Apenas consulta a tarefa (não remove ainda)
         with self.GlobalTable.lock:
-            task_info = self.GlobalTable.assigned_tasks.pop(task_id, None)
-            
+            task_info = self.GlobalTable.assigned_tasks.get(task_id)
+
         if task_info is None:
             return None
 
         peer = task_info["peer"]
         task = task_info["task"]
-        peer.metrics = metrics
 
-        new_score = float(metrics.get("f1_score", 0.0))
-        
-        # Obtém o score do melhor modelo atual usando o método thread-safe da GlobalTable
+        # Caso o treinamento tenha falhado
+        if metrics.get("status") == "failed":
+            log.warning(
+                f"Tarefa {task_id} falhou: {metrics.get('error')}"
+            )
+
+            with self.GlobalTable.lock:
+                self.GlobalTable.assigned_tasks.pop(task_id, None)
+                self.GlobalTable.task_pool.insert(0, task)
+
+            return None
+
+        # Valida o score antes de remover definitivamente a tarefa
+        score = metrics.get("f1_score")
+
+        if score is None:
+            log.warning(
+                f"Tarefa {task_id} retornou f1_score inválido."
+            )
+
+            with self.GlobalTable.lock:
+                self.GlobalTable.assigned_tasks.pop(task_id, None)
+                self.GlobalTable.task_pool.insert(0, task)
+
+            return None
+
+        # Agora sim a tarefa pode ser removida
+        with self.GlobalTable.lock:
+            self.GlobalTable.assigned_tasks.pop(task_id, None)
+
+        peer.metrics = metrics
+        new_score = float(score)
+
+        # Obtém o melhor modelo atual
         current_best = self.get_best_model()
-        current_best_score = current_best.get("f1_score", -1.0) if current_best is not None else -1.0
+        current_best_score = (
+            current_best.get("f1_score", -1.0)
+            if current_best is not None
+            else -1.0
+        )
 
         if new_score > current_best_score:
             is_new_best = True
-            # Salva o melhor modelo de forma centralizada
+
             self.update_best_model(
                 task_id=task_id,
                 peer_id=peer.id_node,
                 hyperparameters=task.parametros,
                 metrics=dict(metrics),
                 f1_score=new_score,
+                model_bytes=metrics["model_bytes"],
             )
-            
+
         if is_new_best and self._pubsub_queue is not None:
             publish_msg = PubSubPublish(
                 id_node="server",
@@ -327,14 +364,17 @@ class Coordinator:
                 payload={
                     "task_id": task_id,
                     "id_node": peer.id_node,
-                    "f1_score": metrics.get("f1_score", 0.0),
+                    "f1_score": new_score,
                     "accuracy": metrics.get("accuracy", 0.0),
                     "precision": metrics.get("precision", 0.0),
                     "recall": metrics.get("recall", 0.0),
                     "roc_auc": metrics.get("roc_auc", 0.0),
                 },
             )
-            self._pubsub_queue.put_nowait(publish_msg.to_dict())
+
+            self._pubsub_queue.put_nowait(
+                publish_msg.to_dict()
+            )
 
         return peer, task
 
