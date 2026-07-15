@@ -1,9 +1,11 @@
 # "container" thread-safe para variaveis de dicionários e listas críticos
 
 import hashlib
+import pickle
 import threading
 from enum import Enum
 from dataclasses import asdict
+from pathlib import Path
 
 class ServerState(Enum):
     HASHING = 0
@@ -192,3 +194,18 @@ class GlobalTable:
     def get_fragment_locations(self, fragment_name):
         with self.lock:
             return self.fragments_locations.get(fragment_name, [])
+
+    def persist_state(self, path):
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("wb") as handle:
+            pickle.dump(self.get_snapshot(), handle)
+
+    @classmethod
+    def load_state(cls, path):
+        target = Path(path)
+        if not target.exists():
+            raise FileNotFoundError(target)
+        with target.open("rb") as handle:
+            snapshot = pickle.load(handle)
+        return cls(snapshot=snapshot)

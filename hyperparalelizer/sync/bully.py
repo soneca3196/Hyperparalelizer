@@ -17,6 +17,10 @@ class BullyElection:
         self.current_coordinator_ip: Optional[str] = None
         self.current_coordinator_port: Optional[int] = None
 
+        self._coordinator_event = asyncio.Event()
+        self._election_timeout = 5.0
+        self._max_retries = 3
+
     async def detect_timeout_and_start(self):
         """Invocado quando o KeepAlive falha com o coordenador."""
         print("[Bully] Coordenador caiu. Iniciando eleição...")
@@ -41,9 +45,14 @@ class BullyElection:
         # Se ninguém maior respondeu, eu ganho
         if not responses:
             await self._announce_victory()
-        else:
-            # Alguém maior assumirá, aguarda o anúncio
-            pass
+            return
+
+        self._coordinator_event.clear()
+        try:
+            await asyncio.wait_for(self._coordinator_event.wait(), timeout=self._election_timeout)
+        except asyncio.TimeoutError:
+            log.warning("Bully: coordenador não anunciado no tempo esperado, reiniciando eleição")
+            await self.detect_timeout_and_start()
 
     async def _announce_victory(self):
         self.election_in_progress = False
@@ -83,6 +92,7 @@ class BullyElection:
         new_coord = msg.get("id_node")
         print(f"[Bully] Novo coordenador estabelecido: {new_coord}")
         self.election_in_progress = False
+        self._coordinator_event.set()
 
         self.current_coordinator_id = new_coord
 

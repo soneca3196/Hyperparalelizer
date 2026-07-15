@@ -33,6 +33,7 @@ class PeerMessenger:
 
         self._outbound_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._outbound_thread: Optional[threading.Thread] = None
+        self._loop_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
     # Ligação com outros componentes
@@ -46,12 +47,15 @@ class PeerMessenger:
 
         try:
             self.loop = asyncio.get_running_loop()
+            return
         except RuntimeError:
-            try:
-                self.loop = asyncio.get_event_loop_policy().get_event_loop()
-            except RuntimeError:
-                self.loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(self.loop)
+            pass
+
+        try:
+            self.loop = asyncio.get_event_loop_policy().get_event_loop()
+        except RuntimeError:
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
 
     def register_handlers(self, p2p_node: P2PNode) -> None:
         """Registra mensagens vindas do servidor"""
@@ -90,8 +94,16 @@ class PeerMessenger:
     def start(self) -> None:
         """Inicia a thread que consome a fila"""
         self._ensure_loop()
-        if self.loop is None or not self.loop.is_running():
-            raise RuntimeError("PeerMessenger requires a running event loop")
+        if self.loop is None:
+            raise RuntimeError("PeerMessenger requires an event loop")
+
+        if not self.loop.is_running():
+            self._loop_thread = threading.Thread(
+                target=self.loop.run_forever,
+                name="peer-messenger-loop",
+                daemon=True,
+            )
+            self._loop_thread.start()
 
         self._stop_event.clear()
         self._outbound_thread = threading.Thread(
@@ -105,6 +117,16 @@ class PeerMessenger:
         self._stop_event.set()
         if self._outbound_thread and self._outbound_thread.is_alive():
             self._outbound_thread.join(timeout=5.0)
+
+        if self._loop_thread and self._loop_thread.is_alive():
+            if self.loop is not None and not self.loop.is_closed():
+                self.loop.call_soon_threadsafe(self.loop.stop)
+            self._loop_thread.join(timeout=5.0)
+
+        if self.loop is not None and not self.loop.is_closed():
+            self.loop.close()
+
+        self.loop = None
 
     def _outbound_worker(self) -> None:
         log.info("PeerMessenger: outbound worker iniciado")

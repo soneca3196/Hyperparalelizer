@@ -11,6 +11,7 @@ import pickle
 import queue
 import time
 import uuid
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -274,7 +275,7 @@ class Coordinator:
         return True
 
     async def dispatch_all_idle(self) -> List[str]:
-        """Envia tarefas para todos os peers ociosos. Retorna lista de node_ids que receberam tarefa com sucesso."""
+        """Envia tarefas para todos os peers ociosos"""
         with self.GlobalTable.lock:
             busy_ids = {entry["peer"].id_node for entry in self.GlobalTable.assigned_tasks.values()}
             all_nodes = list(self.GlobalTable.nodes.values())
@@ -296,6 +297,19 @@ class Coordinator:
                 self.GlobalTable.system_state = ServerState.MODEL_DISTRIBUTION
 
         return dispatched
+
+    async def run_scheduler_loop(self, interval: float = 1.0, max_iterations: Optional[int] = None) -> int:
+        """despacho e reatribuição de tarefas"""
+        iterations = 0
+        while max_iterations is None or iterations < max_iterations:
+            self.check_task_status()
+            dispatched = await self.dispatch_all_idle()
+            iterations += 1
+            if not dispatched and not self.GlobalTable.task_pool:
+                break
+            if interval > 0:
+                await asyncio.sleep(interval)
+        return iterations
 
     # DISTRIBUIÇÃO                                                         
     def distribute_dataset(self):
@@ -326,6 +340,23 @@ class Coordinator:
         log.warning(f"handle_peer_failure: peer {node_id[:8]}… removido e tarefas reencaminhadas")
 
     
+    def persist_state(self, path: str | Path | None = None) -> None:
+        """Persiste o estado da GlobalTable"""
+        target = Path(path) if path is not None else Path("data/state.pkl")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("wb") as handle:
+            pickle.dump(self.GlobalTable.get_snapshot(), handle)
+
+    @classmethod
+    def load_state(cls, path: str | Path | None = None) -> "GlobalTable":
+        """Carrega a GlobalTable a partir do disco"""
+        target = Path(path) if path is not None else Path("data/state.pkl")
+        if not target.exists():
+            raise FileNotFoundError(target)
+        with target.open("rb") as handle:
+            snapshot = pickle.load(handle)
+        return GlobalTable(snapshot=snapshot)
+
     def receive_task_result(self, task_id: str, metrics: Dict[str, Any],) -> Optional[tuple]:
         """
         `metrics` é o TaskResult inteiro recebido do peer (dict), incluindo
