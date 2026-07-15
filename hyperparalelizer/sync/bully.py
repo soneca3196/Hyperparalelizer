@@ -1,6 +1,6 @@
 import asyncio
 from typing import Dict, Any
-from core.network import send_once
+from core.network import send_once, send_message
 from utils.logger import get_logger
 
 log = get_logger("sync/bully")
@@ -61,7 +61,7 @@ class BullyElection:
         try:
             if str(self.my_id) > str(sender_id):
                 alive_msg = {"type": "BullyAlive", "id_node": self.my_id}
-                await send_once(writer.get_extra_info('peername')[0], msg.get("port", 5000), alive_msg, expect_reply=False)
+                await send_message(writer, alive_msg)
                 if not self.election_in_progress:
                     asyncio.create_task(self.detect_timeout_and_start())
         except Exception:

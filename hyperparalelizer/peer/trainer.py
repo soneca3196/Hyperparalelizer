@@ -40,10 +40,7 @@ class TrainerNode:
         self.best_model = None
         self.best_score = -1.0
         
-        # Variáveis de Backup (Peer Pupilo)
-        self.replica_global_table = {}
-        self.replica_queue = []
-        self.replica_best_model = {}
+        self.replica_global_table_snapshot: dict = {}
 
     # Receber task
 
@@ -172,7 +169,7 @@ class TrainerNode:
             "type": "SendBestModel",
             "id_node": self.node_id,
             "model_bytes": serialized_model,
-            "metricas": {"f1": self.best_score},
+            "metricas": {"f1_score": self.best_score},
         }
 
         self.messenger.send(message)
@@ -180,30 +177,22 @@ class TrainerNode:
     # Replicação e Bully (Pupilo)
 
     def handle_sync_state(self, msg: dict):
-        # Guarda o backup passivamente
-        self.replica_global_table = msg.get("global_table_snapshot", {})
-        self.replica_queue = msg.get("task_queue_snapshot", [])
-        self.replica_best_model = msg.get("best_model_metrics", {})
+
+        self.replica_global_table_snapshot = msg.get("global_table_snapshot", {})
         print(f"[Pupilo {self.node_id}] Estado de backup atualizado.")
 
-
-    def promote_to_server(self):
+    def promote_to_server(self) -> "Coordinator":
         print(f"[Pupilo {self.node_id}] Fui promovido! A assumir o estado do Coordenador...")
-        
-        # Reconstruir a Tabela com o backup
-        tabela_recuperada = GlobalTable()
-        tabela_recuperada.nodes = self.replica_global_table
-        
-        # Instanciar o novo Coordenador com a Tabela em vez da DHT
+        tabela_recuperada = GlobalTable(snapshot=self.replica_global_table_snapshot)
+
         novo_coordenador = Coordinator(
-            dataset=[], 
-            model=None, 
-            GlobalTable=tabela_recuperada, 
-            model_type="generic"
+            dataset=[],
+            model=None,
+            global_table=tabela_recuperada,
+            model_type="generic",
         )
-        
-        novo_coordenador.task_pool = self.replica_queue
-        novo_coordenador.best_model = self.replica_best_model
-        
+
         if self.event_bus is not None:
             self._emit(PupilPromoted(coordinator=novo_coordenador))
+
+        return novo_coordenador
