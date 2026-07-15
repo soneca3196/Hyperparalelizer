@@ -302,6 +302,29 @@ class Coordinator:
         with self.GlobalTable.lock:
             self.GlobalTable.system_state = ServerState.DATASET_DISTRIBUTION
 
+    def handle_peer_failure(self, node_id: str) -> None:
+        """Remove um peer falho da GlobalTable e reencaminha suas tarefas para a fila."""
+        with self.GlobalTable.lock:
+            node_entry = self.GlobalTable.nodes.pop(node_id, None)
+            if node_entry is None:
+                return
+
+            for fragment_name, locations in list(self.GlobalTable.fragments_locations.items()):
+                if node_id in locations:
+                    self.GlobalTable.fragments_locations[fragment_name] = [
+                        loc for loc in locations if loc != node_id
+                    ]
+
+            for task_id, task_info in list(self.GlobalTable.assigned_tasks.items()):
+                peer = task_info.get("peer")
+                if peer is not None and getattr(peer, "id_node", None) == node_id:
+                    task = task_info.get("task")
+                    if task is not None:
+                        self.GlobalTable.task_pool.insert(0, task)
+                    self.GlobalTable.assigned_tasks.pop(task_id, None)
+
+        log.warning(f"handle_peer_failure: peer {node_id[:8]}… removido e tarefas reencaminhadas")
+
     
     def receive_task_result(self, task_id: str, metrics: Dict[str, Any],) -> Optional[tuple]:
         """

@@ -1,7 +1,8 @@
 import asyncio
 from typing import List, Dict, Any
 from hyperparalelizer.sync.lamport import LamportClock
-from core.network import send_once
+from core.network import P2PNode, send_once, send_message
+from utils.protocol import MSG_MAEKAWA_GRANT, MSG_MAEKAWA_RELEASE, MSG_MAEKAWA_REQUEST
 
 
 class MaekawaTimeoutError(Exception):
@@ -77,6 +78,11 @@ class MaekawaMutex:
         )
 
 
+    def register_handlers(self, p2p_node: P2PNode) -> None:
+        p2p_node.register_handler(MSG_MAEKAWA_REQUEST, self.handle_request)
+        p2p_node.register_handler(MSG_MAEKAWA_GRANT, self.handle_grant)
+        p2p_node.register_handler(MSG_MAEKAWA_RELEASE, self.handle_release)
+
     async def release_access(self):
         """Peer invoca isso após atualizar o best_model."""
         self.state = "RELEASED"
@@ -105,12 +111,14 @@ class MaekawaMutex:
             self.request_queue.sort() 
         else:
             self.voted = True
-            grant_msg = {"type": "MaekawaGrant", "id_node": self.node_id}
+            grant_msg = {"type": MSG_MAEKAWA_GRANT, "id_node": self.node_id}
             
             # Busca o IP e Porta 
             ip_do_no, porta_do_no = self._get_peer_address(req_node)
             if ip_do_no and porta_do_no:
                 await send_once(ip_do_no, porta_do_no, grant_msg, expect_reply=False)
+            else:
+                await send_message(writer, grant_msg)
 
 
     async def handle_grant(self, msg: dict, writer: asyncio.StreamWriter):
@@ -121,13 +129,15 @@ class MaekawaMutex:
         if len(self.granted_by) >= len(self.quorum):
             self.grant_event.set()
 
+        await send_message(writer, {"type": "Ack", "ref_type": MSG_MAEKAWA_GRANT, "ref_id": sender_id})
+
 
     async def handle_release(self, msg: dict, writer: asyncio.StreamWriter):
         if self.request_queue:
             next_req = self.request_queue.pop(0)
             target_node_id = next_req[1] # Pega o ID do nó que estava na fila
             
-            grant_msg = {"type": "MaekawaGrant", "id_node": self.node_id}
+            grant_msg = {"type": MSG_MAEKAWA_GRANT, "id_node": self.node_id}
             
             ip_do_no, porta_do_no = self._get_peer_address(target_node_id)
 
@@ -137,3 +147,5 @@ class MaekawaMutex:
             self.voted = True
         else:
             self.voted = False
+
+        await send_message(writer, {"type": "Ack", "ref_type": MSG_MAEKAWA_RELEASE, "ref_id": msg.get("id_node")})

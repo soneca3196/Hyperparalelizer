@@ -1,7 +1,8 @@
 import asyncio
 from typing import Any, Dict, Optional
-from core.network import send_once, send_message
+from core.network import P2PNode, send_once, send_message
 from utils.logger import get_logger
+from utils.protocol import MSG_BULLY_ALIVE, MSG_BULLY_COORDINATOR, MSG_BULLY_ELECTION
 
 log = get_logger("sync/bully")
 
@@ -56,6 +57,11 @@ class BullyElection:
         self.promote_callback()
 
     # Handlers para P2PNode
+    def register_handlers(self, p2p_node: P2PNode) -> None:
+        p2p_node.register_handler(MSG_BULLY_ELECTION, self.handle_election)
+        p2p_node.register_handler(MSG_BULLY_COORDINATOR, self.handle_coordinator)
+        p2p_node.register_handler(MSG_BULLY_ALIVE, self.handle_alive)
+
     async def handle_election(self, msg: dict, writer: asyncio.StreamWriter):
         sender_id = msg.get("id_node")
         # Normaliza e valida sender_id antes de comparar (pode ser None)
@@ -87,3 +93,9 @@ class BullyElection:
         else:
             self.current_coordinator_ip = None
             self.current_coordinator_port = None
+
+    async def handle_alive(self, msg: dict, writer: asyncio.StreamWriter):
+        sender_id = msg.get("id_node")
+        if sender_id:
+            log.debug(f"[Bully] heartbeat recebido de {sender_id}")
+        await send_message(writer, {"type": "Ack", "ref_type": MSG_BULLY_ALIVE, "ref_id": sender_id})

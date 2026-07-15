@@ -49,49 +49,72 @@ async def send_once(
     *,
     expect_reply: bool = True,
     timeout: float = DEFAULT_TIMEOUT,
+    max_retries: int = 1,
+    retry_delay: float = 0.2,
 ) -> Optional[Dict[str, Any]]:
-    """Abre conexão, envia mensagem e fecha."""
-    try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(ip, port),
-            timeout=timeout,
-        )
+    """Abre conexão, envia mensagem e fecha, com retry simples para falhas transitórias."""
+    last_error: Optional[Exception] = None
 
-    except (OSError, asyncio.TimeoutError) as exc:
-        log.warning(f"send_once: failed to connect to {ip}:{port} — {exc}")
-        return None
-
-    try:
-        await send_message(writer, data)
-
-        if not expect_reply:
+    for attempt in range(max_retries + 1):
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(ip, port),
+                timeout=timeout,
+            )
+        except (OSError, asyncio.TimeoutError) as exc:
+            last_error = exc
+            if attempt < max_retries:
+                if retry_delay > 0:
+                    await asyncio.sleep(retry_delay)
+                continue
+            log.warning(f"send_once: failed to connect to {ip}:{port} — {exc}")
             return None
 
-        reply = await asyncio.wait_for(
-            recv_message(reader),
-            timeout=timeout,
-        )
-
-        return reply
-
-    except asyncio.TimeoutError:
-        log.warning(
-            f"send_once: timeout waiting for reply from {ip}:{port}"
-        )
-        return None
-
-    except Exception as exc:
-        log.error(
-            f"send_once: error communicating with {ip}:{port} — {exc}"
-        )
-        return None
-
-    finally:
         try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            pass
+            await send_message(writer, data)
+
+            if not expect_reply:
+                return None
+
+            reply = await asyncio.wait_for(
+                recv_message(reader),
+                timeout=timeout,
+            )
+
+            return reply
+
+        except asyncio.TimeoutError:
+            last_error = asyncio.TimeoutError()
+            if attempt < max_retries:
+                if retry_delay > 0:
+                    await asyncio.sleep(retry_delay)
+                continue
+            log.warning(
+                f"send_once: timeout waiting for reply from {ip}:{port}"
+            )
+            return None
+
+        except Exception as exc:
+            last_error = exc
+            if attempt < max_retries:
+                if retry_delay > 0:
+                    await asyncio.sleep(retry_delay)
+                continue
+            log.error(
+                f"send_once: error communicating with {ip}:{port} — {exc}"
+            )
+            return None
+
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    if last_error is not None:
+        log.warning(f"send_once: exhausted retries for {ip}:{port} — {last_error}")
+    return None
 
 
 # Conexão persistente
