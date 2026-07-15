@@ -336,7 +336,7 @@ Para o projeto, a regra mais coerente é:
 
 ---
 
-## 2.8. Resultados de treinamento com erro quebram o servidor
+## [FIXED] 2.8. Resultados de treinamento com erro quebram o servidor
 
 Quando o treino falha, o peer envia:
 
@@ -399,7 +399,7 @@ Internamente, esses métodos usam a `GlobalTable`.
 
 ---
 
-## 2.10. O “melhor modelo” não contém o modelo
+## [FIXED] 2.10. O “melhor modelo” não contém o modelo
 
 O servidor salva apenas:
 

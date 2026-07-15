@@ -189,7 +189,7 @@ async def handle_request_best_model(
         )
         return
 
-    model_bytes = pickle.dumps(best)
+    model_bytes = best["model_bytes"]
     metricas = {
         k: float(v)
         for k, v in best.get("metrics", {}).items()
