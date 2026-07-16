@@ -6,3 +6,5 @@ test_coordinator.py
 .venv/
 .venv/**/*
 **/__init__.py
+data/
+data/**/*
