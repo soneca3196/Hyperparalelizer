@@ -112,9 +112,6 @@ async def handle_join_network(msg: Dict[str, Any], writer: asyncio.StreamWriter,
         f"fragmento={fragment_id}, "
         f"task={task.task_id if task else None}"
     )
-    # Dispacha a tarefa reservada para o peer recém-registrado
-    if task is not None:
-        asyncio.create_task(coordinator.dispatch_next_task(peer))
 
     return node_id
 

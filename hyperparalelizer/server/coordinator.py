@@ -102,14 +102,7 @@ class Coordinator:
 
         if dataset_fragments:
             fragment_index = ( peer_index % len(dataset_fragments))
-
             fragment_id = dataset_fragments[fragment_index]
-
-            # Atenção: idealmente esta localização só deve ser
-            # registrada depois do DatasetReady.
-            # Para não alterar todo o fluxo agora, pode deixar
-            # temporariamente assim.
-            self.GlobalTable.add_fragment_location(fragment_id, node_id,)
 
         task = self.assign_hyperparameters_to_peer(peer)
 
