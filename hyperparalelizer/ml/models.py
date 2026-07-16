@@ -1,8 +1,16 @@
 from sklearn.neural_network import MLPClassifier
 from sklearn.ensemble import RandomForestClassifier
-from xgboost import XGBClassifier
-from lightgbm import LGBMClassifier
 import numpy as np
+
+try:
+    from xgboost import XGBClassifier
+except ImportError:  # pragma: no cover - depends on optional dependency availability
+    XGBClassifier = None
+
+try:
+    from lightgbm import LGBMClassifier
+except ImportError:  # pragma: no cover - depends on optional dependency availability
+    LGBMClassifier = None
 
 """
 Classe base para todos os wrappers de modelos de classificação.
@@ -72,6 +80,8 @@ class XGBWrapper(BaseModel):
 
     def __init__(self, params):
         super().__init__(params)
+        if XGBClassifier is None:
+            raise ImportError("xgboost não está instalado")
         self.model = XGBClassifier(**params, eval_metric="logloss", verbosity=0)
 
     def fit(self, X, y):
@@ -84,6 +94,8 @@ class LGBMWrapper(BaseModel):
 
     def __init__(self, params):
         super().__init__(params)
+        if LGBMClassifier is None:
+            raise ImportError("lightgbm não está instalado")
         self.model = LGBMClassifier(**params, verbosity=-1)
 
     def fit(self, X, y):

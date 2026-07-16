@@ -27,6 +27,7 @@ class PeerMessenger:
         self.server_ip = server_ip
         self.server_port = server_port
         self.loop = loop
+        self._owns_loop = False
         self._ensure_loop()
 
         self.trainer = None  # setado via attach_trainer()
@@ -43,19 +44,23 @@ class PeerMessenger:
 
     def _ensure_loop(self) -> None:
         if self.loop is not None:
+            self._owns_loop = False
             return
 
         try:
             self.loop = asyncio.get_running_loop()
+            self._owns_loop = False
             return
         except RuntimeError:
             pass
 
         try:
             self.loop = asyncio.get_event_loop_policy().get_event_loop()
+            self._owns_loop = False
         except RuntimeError:
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
+            self._owns_loop = True
 
     def register_handlers(self, p2p_node: P2PNode) -> None:
         """Registra mensagens vindas do servidor"""
@@ -123,7 +128,7 @@ class PeerMessenger:
                 self.loop.call_soon_threadsafe(self.loop.stop)
             self._loop_thread.join(timeout=5.0)
 
-        if self.loop is not None and not self.loop.is_closed():
+        if self._owns_loop and self.loop is not None and not self.loop.is_closed():
             self.loop.close()
 
         self.loop = None

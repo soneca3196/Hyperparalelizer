@@ -101,12 +101,15 @@ class TrainingTask:
 class TaskResult:
     task_id: str
     id_node: str
-    accuracy: float
-    precision: float
-    recall: float
-    f1_score: float
-    roc_auc: float
+    accuracy: Optional[float] = None
+    precision: Optional[float] = None
+    recall: Optional[float] = None
+    f1_score: Optional[float] = None
+    roc_auc: Optional[float] = None
     tempo_treino_s: float = 0.0
+    status: Optional[str] = None
+    error: Optional[str] = None
+    model_bytes: Optional[bytes] = None
 
     type: str = field(default=MSG_TASK_RESULT, init=False)
 

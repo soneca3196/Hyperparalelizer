@@ -111,6 +111,7 @@ def test_peer_runtime_bootstrap_wires_components():
     class DummyThread:
         def __init__(self, *args, **kwargs):
             self.joined = False
+            self.node_id = None
 
         async def join_network(self, *args, **kwargs):
             self.joined = True
@@ -152,3 +153,114 @@ def test_peer_runtime_bootstrap_wires_components():
     assert runtime.data_thread.joined is True
     assert runtime.messenger.attached is True
     assert runtime.messenger.started is True
+
+
+def test_peer_runtime_propagates_node_id_and_initial_dependencies():
+    class DummyThread:
+        def __init__(self, *args, **kwargs):
+            self.node_id = None
+            self.initial_task = None
+
+        async def join_network(self, *args, **kwargs):
+            return {"node_id": "peer-boot"}
+
+    class DummyMessenger:
+        def __init__(self, *args, **kwargs):
+            self.attached = None
+            self.registered = None
+
+        def attach_trainer(self, trainer):
+            self.attached = trainer
+
+        def register_handlers(self, p2p_node):
+            self.registered = p2p_node
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+    class DummyTrainer:
+        def __init__(self, node_id, messenger, data_thread, dataset_loader, maekawa_mutex, **kwargs):
+            self.node_id = node_id
+            self.messenger = messenger
+            self.data_thread = data_thread
+            self.dataset_loader = dataset_loader
+            self.maekawa_mutex = maekawa_mutex
+
+    runtime = PeerRuntime(
+        node_id="old-node-id",
+        host="127.0.0.1",
+        listen_port=0,
+        server_ip="127.0.0.1",
+        server_port=9005,
+        data_thread_cls=DummyThread,
+        messenger_cls=DummyMessenger,
+        trainer_cls=DummyTrainer,
+    )
+
+    async def run_bootstrap():
+        await runtime.bootstrap()
+
+    asyncio.run(run_bootstrap())
+
+    assert runtime.node_id == "peer-boot"
+    assert runtime.data_thread.node_id == "peer-boot"
+    assert runtime.trainer.node_id == "peer-boot"
+    assert runtime.trainer.dataset_loader is not None
+    assert runtime.trainer.maekawa_mutex is not None
+    assert runtime.p2p_node.node_id == "peer-boot"
+
+
+def test_peer_runtime_registers_maekawa_and_bully_handlers():
+    class DummyThread:
+        def __init__(self, *args, **kwargs):
+            self.node_id = None
+            self.initial_task = None
+
+        async def join_network(self, *args, **kwargs):
+            return {"node_id": "peer-handlers"}
+
+    class DummyMessenger:
+        def __init__(self, *args, **kwargs):
+            self.registered = None
+
+        def attach_trainer(self, trainer):
+            return None
+
+        def register_handlers(self, p2p_node):
+            self.registered = p2p_node
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+    class DummyTrainer:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    runtime = PeerRuntime(
+        node_id="old-node-id",
+        host="127.0.0.1",
+        listen_port=0,
+        server_ip="127.0.0.1",
+        server_port=9006,
+        data_thread_cls=DummyThread,
+        messenger_cls=DummyMessenger,
+        trainer_cls=DummyTrainer,
+        maekawa_mutex_cls=MaekawaMutex,
+        bully_cls=BullyElection,
+    )
+
+    async def run_bootstrap():
+        await runtime.bootstrap()
+
+    asyncio.run(run_bootstrap())
+
+    assert runtime.maekawa_mutex is not None
+    assert runtime.bully is not None
+    assert MSG_MAEKAWA_REQUEST in runtime.p2p_node._handlers
+    assert MSG_BULLY_ELECTION in runtime.p2p_node._handlers

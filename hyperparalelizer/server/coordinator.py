@@ -41,7 +41,8 @@ class Coordinator:
     def __init__(self, dataset, model, global_table: GlobalTable,
                  model_type: str = "generic",
                  model_config: Optional[Dict[str, Any]] = None,
-                 pubsub_queue: Optional[queue.Queue] = None):
+                 pubsub_queue: Optional[queue.Queue] = None,
+                 task_timeout: float = TASK_TIMEOUT):
         # Configurações estáticas/inputs (não mudam ao longo do ciclo de vida)
         self.dataset = dataset
         self.model = model
@@ -51,6 +52,7 @@ class Coordinator:
         # Dependências externas
         self.GlobalTable = global_table
         self._pubsub_queue = pubsub_queue  # fila Middleware → PubSubClient
+        self.task_timeout = float(task_timeout)
         
         # Referência ao peer pupilo (se existir)
         self.pupil_peer: Optional[Dict[str, Any]] = None
@@ -219,7 +221,10 @@ class Coordinator:
 
         with self.GlobalTable.lock:
             for task_id, entry in list(self.GlobalTable.assigned_tasks.items()):
-                if now - entry["timestamp"] > TASK_TIMEOUT:
+                timestamp = entry.get("timestamp")
+                if timestamp is None:
+                    continue
+                if now - timestamp > self.task_timeout:
                     timed_out_ids.append(task_id)
 
             for task_id in timed_out_ids:
@@ -261,6 +266,11 @@ class Coordinator:
             )
             return False
 
+        with self.GlobalTable.lock:
+            entry = self.GlobalTable.assigned_tasks.get(task.task_id)
+            if entry is not None:
+                entry["timestamp"] = time.time()
+
         log.info(
             f"dispatch_next_task: tarefa {task.task_id[:8]}… "
             f"enviada para {peer.id_node[:8]}… ({peer.ip}:{peer.port})"
@@ -298,7 +308,10 @@ class Coordinator:
             self.check_task_status()
             dispatched = await self.dispatch_all_idle()
             iterations += 1
-            if not dispatched and not self.GlobalTable.task_pool:
+            with self.GlobalTable.lock:
+                no_pending = not self.GlobalTable.task_pool
+                no_running = not self.GlobalTable.assigned_tasks
+            if not dispatched and no_pending and no_running:
                 break
             if interval > 0:
                 await asyncio.sleep(interval)
