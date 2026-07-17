@@ -1,11 +1,12 @@
 """Abre conexão com o servidor, obtém o fragmento atribuído e a lista de
 peers, e garante que o dataset esteja montado localmente antes do treino"""
 
+import asyncio
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from utils.logger import get_logger
-from utils.protocol import JoinNetwork, DatasetReady, MSG_JOIN_ACK
+from utils.protocol import JoinNetwork, DatasetReady, MSG_JOIN_ACK, validate_ack
 from core.network import send_once
 from hyperparalelizer.peer.download_worker import fetch_fragment, fetch_fragment_from_backup
 from hyperparalelizer.peer.peer_inner_protocol import (
@@ -209,3 +210,73 @@ class DataThread:
         else:
             log.warning(f"DataThread: falha ao notificar DatasetReady para '{fid}'")
         return ok
+
+class ValidatingDataThread(DataThread):
+    """DataThread que valida o dataset e confirma cada fragmento uma vez.
+
+    Usa um ``ValidatingDatasetLoader`` (anexado via ``attach_dataset_loader``)
+    para garantir, antes do treino, que os fragmentos remontados pertencem à
+    execução esperada. Também evita reenviar ``DatasetReady`` repetidamente
+    para o mesmo fragmento.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.dataset_loader = None
+        self._notified_fragments: Set[str] = set()
+        self.last_validation_error: Optional[str] = None
+
+    def attach_dataset_loader(self, loader: Any) -> None:
+        self.dataset_loader = loader
+
+    async def assemble_many(self, fragment_ids: List[str]) -> bool:
+        # Import local para evitar dependência circular no import do módulo.
+        from hyperparalelizer.ml.dataset_loader import DatasetValidationError
+
+        ok = await super().assemble_many(fragment_ids)
+        if not ok:
+            return False
+
+        if self.dataset_loader is None:
+            self.last_validation_error = "DatasetLoader de validação não conectado"
+            print(f"[VALIDATION ERROR] {self.last_validation_error}")
+            return False
+
+        try:
+            # Executa antes do treino. O Trainer fará uma segunda leitura barata,
+            # mas a chave validada evita repetir os logs.
+            await asyncio.to_thread(self.dataset_loader.load, fragment_ids)
+        except DatasetValidationError as exc:
+            self.last_validation_error = str(exc)
+            print(str(exc))
+            return False
+
+        for fragment_id in fragment_ids:
+            notified = await self.notify_dataset_ready(fragment_id)
+            if not notified:
+                return False
+        return True
+
+    async def notify_dataset_ready(self, fragment_id: Optional[str] = None) -> bool:
+        fid = fragment_id or self.fragment_id
+        if not isinstance(fid, str) or not fid:
+            print("[VALIDATION ERROR] DatasetReady sem fragment_id válido")
+            return False
+        if fid in self._notified_fragments:
+            return True
+
+        reply = await send_once(
+            self.server_ip,
+            self.server_port,
+            DatasetReady(id_node=self.node_id, fragment_id=fid).to_dict(),
+            expect_reply=True,
+            timeout=10.0,
+        )
+        valid = validate_ack(reply, expected_ref_type="DatasetReady", expected_ref_id=fid)
+        if not valid:
+            print(f"[WARNING] DatasetReady não confirmado para '{fid}'")
+            return False
+
+        self._notified_fragments.add(fid)
+        print(f"[DATASET READY] Posse confirmada uma vez para '{fid}'")
+        return True

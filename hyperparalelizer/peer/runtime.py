@@ -11,16 +11,8 @@ from hyperparalelizer.peer.peer_messenger import PeerMessenger
 from hyperparalelizer.peer.peer_outer_protocol import register_peer_peer_handlers
 from hyperparalelizer.peer.trainer import TrainerNode
 from hyperparalelizer.sync.bully import BullyElection
-from hyperparalelizer.sync.maekawa import MaekawaMutex
+from hyperparalelizer.sync.maekawa import MaekawaMutex, NoOpMutex
 from utils.protocol import Ack, KeepAlive, MSG_BULLY_COORDINATOR, MSG_PUBSUB_NOTIFY, MSG_SYNC_STATE
-
-
-class NoOpMutex:
-    async def request_access(self) -> None:
-        return None
-
-    async def release_access(self) -> None:
-        return None
 
 
 class PeerRuntime:

@@ -1,6 +1,23 @@
-"""
-Mensagens/eventos internos do servidor (não trafegam pela rede)
+# mensagens internas entre threads do server (aquelas definidas no docs)
+# sugestão: python @dataclass (pesquisar)
 
+"""
+server_inner_protocol.py - Mensagens/eventos internos do servidor (não
+trafegam pela rede).
+
+Espelha o padrão de hyperparalelizer/peer/peer_inner_protocol.py, mas do
+lado do Coordinator/ServerMessenger: desacopla a thread de rede (que
+aceita conexões e delega aos handlers em server_peer_protocol.py), a
+rotina de verificação de timeout de tarefas (Coordinator.check_task_status)
+e a thread de replicação/eleição (Bully, para o pupilo), sem que essas
+partes precisem se conhecer diretamente.
+
+Uso típico:
+
+    bus = ServerEventBus()
+    bus.subscribe(EVT_TASK_RESULT_RECEIVED, meu_callback)
+    ...
+    bus.publish(TaskResultReceived(task_id=..., node_id=..., status="success"))
 """
 
 import queue
@@ -14,7 +31,7 @@ from utils.logger import get_logger
 log = get_logger("server_inner_protocol")
 
 
-# Tipos de evento
+# Tipos de evento interno
 
 EVT_PEER_JOINED = "PeerJoined"
 EVT_DATASET_READY_ON_PEER = "DatasetReadyOnPeer"
@@ -28,7 +45,7 @@ EVT_PEER_REMOVED = "PeerRemoved"
 
 @dataclass
 class PeerJoined:
-    """Um novo peer se cadastrou"""
+    """Um novo peer se cadastrou na GlobalTable (JoinNetwork processado)."""
     node_id: str
     ip: str
     port: int
@@ -44,7 +61,7 @@ class PeerJoined:
 
 @dataclass
 class DatasetReadyOnPeer:
-    """Um peer confirmou ter um fragmento"""
+    """Um peer confirmou posse local de um fragmento (DatasetReady)."""
     node_id: str
     fragment_id: str
     timestamp: float = field(default_factory=time.time)
@@ -57,7 +74,7 @@ class DatasetReadyOnPeer:
 
 @dataclass
 class TaskDispatched:
-    """O Coordinator mandou uma task para um peer"""
+    """O Coordinator despachou (ou redespachou) uma task para um peer."""
     task_id: str
     node_id: str
     timestamp: float = field(default_factory=time.time)
@@ -70,7 +87,7 @@ class TaskDispatched:
 
 @dataclass
 class TaskResultReceived:
-    """Resultado de uma task recebido de um peer"""
+    """Resultado (sucesso ou falha) de uma task recebido de um peer."""
     task_id: str
     node_id: str
     status: str  # "success" | "failed"
@@ -87,7 +104,7 @@ class TaskResultReceived:
 
 @dataclass
 class TaskTimedOut:
-    """Uma task excedeu TASK_TIMEOUT e foi devolvida"""
+    """Uma task atribuída excedeu TASK_TIMEOUT e foi devolvida ao pool."""
     task_id: str
     node_id: str
     timestamp: float = field(default_factory=time.time)
@@ -100,7 +117,7 @@ class TaskTimedOut:
 
 @dataclass
 class GlobalBestModelUpdated:
-    """O melhor modelo global mudou"""
+    """O melhor modelo global (GlobalTable.best_model) mudou."""
     task_id: str
     node_id: str
     f1_score: float
@@ -114,7 +131,7 @@ class GlobalBestModelUpdated:
 
 @dataclass
 class PupilSynced:
-    """A tabela GlobalTable foi copiada no pupilo"""
+    """Um snapshot da GlobalTable foi replicado com sucesso para o pupilo."""
     pupil_ip: str
     pupil_port: int
     timestamp: float = field(default_factory=time.time)
@@ -127,7 +144,7 @@ class PupilSynced:
 
 @dataclass
 class PeerRemoved:
-    """Um peer foi removido da GlobalTable"""
+    """Um peer foi removido da GlobalTable (KeepAlive falhou)."""
     node_id: str
     reason: str = "keepalive_failed"
     timestamp: float = field(default_factory=time.time)
@@ -138,16 +155,18 @@ class PeerRemoved:
         return asdict(self)
 
 
-# Barramento interno
+# Barramento interno (thread-safe)
 
 InternalEvent = Any
 EventCallback = Callable[[InternalEvent], None]
 
 
 class ServerEventBus:
-    """
-    Igual ao peer_inner_protocol.InternalEventBus, mas duplicado aqui para manter server/ e peer/ separados um do outro.
+    """Pub/sub thread-safe para eventos internos do servidor.
 
+    Mesma implementação de hyperparalelizer.peer.peer_inner_protocol.
+    InternalEventBus, duplicada aqui (em vez de compartilhada) para manter
+    server/ e peer/ desacoplados um do outro.
     """
 
     def __init__(self) -> None:
@@ -182,7 +201,7 @@ class ServerEventBus:
                 log.error(f"ServerEventBus: assinante de '{event_type}' falhou - {exc}")
 
     def drain_history(self) -> List[InternalEvent]:
-        """Esvazia e retorna o histórico"""
+        """Esvazia e retorna o histórico (útil para debugging/testes)."""
         events: List[InternalEvent] = []
         while True:
             try:

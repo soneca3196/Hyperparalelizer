@@ -26,7 +26,7 @@ log = get_logger("trainer")
 
 
 class TrainerNode:
-    def __init__(self, node_id, messenger, data_thread, dataset_loader, maekawa_mutex, event_bus: Optional[InternalEventBus] = None, run_id: str = ""):
+    def __init__(self, node_id, messenger, data_thread, dataset_loader, maekawa_mutex, event_bus: Optional[InternalEventBus] = None):
         """
         event_bus: opcional, publica o ciclo de vida do treino (TrainingStarted, TrainingFinished, TrainingFailed)
         """
@@ -37,63 +37,10 @@ class TrainerNode:
         self.maekawa_mutex = maekawa_mutex
         self.event_bus = event_bus
 
-        self.run_id = run_id or ""
-
         self.best_model = None
         self.best_score = -1.0
-        self.busy = False
-
+        
         self.replica_global_table_snapshot: dict = {}
-
-        self.is_pupil = False
-        self.pupil_epoch = 0
-
-        self._training_lock = asyncio.Lock()
-        self._current_task_id: Optional[str] = None
-        self._processed_task_ids: set = set()
-
-    async def try_submit_task(self, task: Dict[str, Any]) -> bool:
-        """Aceita a task apenas se o peer estiver livre e ela ainda não tiver
-        sido processada. Retorna False para PEER_BUSY / duplicata."""
-        task_id = str(task.get("task_id") or "")
-        if not task_id:
-            return False
-        task_run_id = task.get("run_id") or ""
-        if self.run_id and task_run_id and task_run_id != self.run_id:
-            log.warning(
-                f"[Trainer {self.node_id[:8]}...] TrainingTask '{task_id}' "
-                f"rejeitada: run_id divergente ({task_run_id} != {self.run_id})"
-            )
-            return False
-        if task_id in self._processed_task_ids:
-            return False
-        if self._training_lock.locked():
-            return False
-
-        asyncio.create_task(self._run_guarded(task))
-        return True
-
-    async def _run_guarded(self, task: Dict[str, Any]) -> None:
-        async with self._training_lock:
-            task_id = str(task.get("task_id") or "")
-            self._current_task_id = task_id
-            try:
-                await self.handle_training_task(task)
-                self._processed_task_ids.add(task_id)
-            finally:
-                self._current_task_id = None
-
-
-    def handle_global_best_score(self, payload: Dict[str, Any]) -> None:
-        try:
-            score = float(payload.get("f1_score", -1.0))
-        except (TypeError, ValueError):
-            return
-        if score > self.best_score:
-            self.best_score = score
-            log.info(
-                f"[Trainer {self.node_id[:8]}...] score global atualizado via Pub/Sub: {score:.4f}"
-            )
 
     # Receber task
 
@@ -109,60 +56,40 @@ class TrainerNode:
 
         log.info(f"[Trainer {self.node_id[:8]}...] TrainingTask '{task_id}' recebida")
 
-        self.busy = True
+        # garante os fragmentos
+        fragment_ids = task.get("dataset_fragmentos") or self._default_fragments()
+
+        ok = await self.data_thread.assemble_many(fragment_ids)
+        if not ok:
+            log.error(f"[Trainer {self.node_id[:8]}...] dataset indisponível para '{task_id}'")
+            self._send_result(task, metrics=None, model_bytes=None ,error="dataset_unavailable")
+            self._emit(TrainingFailed(task_id=task_id, node_id=self.node_id, error="dataset_unavailable"))
+            return
+
+        await self.data_thread.notify_dataset_ready(fragment_ids[0] if fragment_ids else None)
+
+        # treino bloqueante roda em thread separada, sem travar o event loop
+        self._emit(TrainingStarted(task_id=task_id, node_id=self.node_id, fragment_ids=fragment_ids))
+        loop = asyncio.get_running_loop()
+        
         try:
-            await self._run_training_task(task, task_id)
-        finally:
-            self.busy = False
-
-    async def _run_training_task(self, task: Dict[str, Any], task_id: str) -> None:
-        result_sent = False
-        try:
-            fragment_ids = task.get("dataset_fragmentos") or self._default_fragments()
-
-            ok = await self.data_thread.assemble_many(fragment_ids)
-            if not ok:
-                log.error(f"[Trainer {self.node_id[:8]}...] dataset indisponível para '{task_id}'")
-                self._send_result(task, metrics=None, model_bytes=None, error="dataset_unavailable")
-                result_sent = True
-                self._emit(TrainingFailed(task_id=task_id, node_id=self.node_id, error="dataset_unavailable"))
-                return
-
-            await self.data_thread.notify_dataset_ready(fragment_ids[0] if fragment_ids else None)
-
-            # treino bloqueante roda em thread separada, sem travar o event loop
-            self._emit(TrainingStarted(task_id=task_id, node_id=self.node_id, fragment_ids=fragment_ids))
-            loop = asyncio.get_running_loop()
-
-            metrics, is_new_best, model_bytes = await loop.run_in_executor(
-                None, self._train_task, task, fragment_ids, task_id
-            )
-
-            # LOGICA DO MAEKAWA: Protege o envio se for um novo melhor modelo
-            if is_new_best:
-                await self.maekawa_mutex.request_access()
-                self._send_result(task, metrics=metrics, model_bytes=model_bytes)
-                result_sent = True
-                await self.maekawa_mutex.release_access()
-            else:
-                self._send_result(task, metrics=metrics, model_bytes=model_bytes)
-                result_sent = True
-
-            self._emit(TrainingFinished(task_id=task_id, node_id=self.node_id, metrics=metrics or {}))
-
+            # Retorna as métricas e um booleano dizendo se quebrou o recorde
+            metrics, is_new_best, model_bytes = await loop.run_in_executor(None, self._train_task, task, fragment_ids, task_id)
         except Exception as exc:
             log.error(f"[Trainer {self.node_id[:8]}...] erro durante treino: {exc}")
-            if not result_sent:
-                self._send_result(task, metrics=None, model_bytes=None, error=str(exc))
-                result_sent = True
+            self._send_result(task, metrics=None, model_bytes=None,error=str(exc))
             self._emit(TrainingFailed(task_id=task_id, node_id=self.node_id, error=str(exc)))
+            return
 
-        finally:
-            if getattr(self.maekawa_mutex, "state", None) == "HELD":
-                try:
-                    await self.maekawa_mutex.release_access()
-                except Exception:
-                    pass
+        # LOGICA DO MAEKAWA: Protege o envio se for um novo melhor modelo
+        if is_new_best:
+            await self.maekawa_mutex.request_access()
+            self._send_result(task, metrics=metrics, model_bytes=model_bytes)
+            await self.maekawa_mutex.release_access()
+        else:
+            self._send_result(task, metrics=metrics, model_bytes=model_bytes)
+
+        self._emit(TrainingFinished(task_id=task_id, node_id=self.node_id, metrics=metrics or {}))
 
     def _emit(self, event) -> None:
         if self.event_bus is not None:
@@ -193,7 +120,7 @@ class TrainerNode:
 
         print(f"[Trainer {self.node_id}] Métricas: {metrics}")
 
-        score = metrics["f1"]  # pode ser trocado para ROC AUC
+        score = metrics["f1_score"]  # pode ser trocado para ROC AUC
         is_new_best = False
         
         if score > self.best_score:
@@ -215,13 +142,12 @@ class TrainerNode:
         message = {
             "type": "TaskResult",
             "task_id": task.get("task_id"),
-            "run_id": task.get("run_id") or self.run_id,
             "status": "success" if error is None else "failed",
             "id_node": self.node_id,
             "accuracy": metrics["accuracy"] if metrics else None,
             "precision": metrics["precision"] if metrics else None,
             "recall": metrics["recall"] if metrics else None,
-            "f1_score": metrics["f1"] if metrics else None,
+            "f1_score": metrics["f1_score"] if metrics else None,
             "roc_auc": metrics["roc_auc"] if metrics else None,
             "model_bytes": model_bytes,
             "error": error,
@@ -256,8 +182,6 @@ class TrainerNode:
         print(f"[Pupilo {self.node_id}] Estado de backup atualizado.")
 
     def promote_to_server(self) -> "Coordinator":
-        if not self.is_pupil:
-            raise RuntimeError("Peer não é o Pupilo ativo")
         print(f"[Pupilo {self.node_id}] Fui promovido! A assumir o estado do Coordenador...")
         tabela_recuperada = GlobalTable(snapshot=self.replica_global_table_snapshot)
 
@@ -266,7 +190,6 @@ class TrainerNode:
             model=None,
             global_table=tabela_recuperada,
             model_type="generic",
-            run_id=self.run_id,
         )
 
         if self.event_bus is not None:

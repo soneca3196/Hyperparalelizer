@@ -2,12 +2,25 @@
 e prepara uma fila para envio ao servidor"""
 
 import asyncio
+import contextlib
+import os
+import pickle
 import queue
 import threading
+import uuid
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from utils.logger import get_logger
-from utils.protocol import MSG_TRAINING_TASK, MSG_REQUEST_BEST, Ack, ErrorMsg
+from utils.protocol import (
+    MSG_ERROR,
+    MSG_REQUEST_BEST,
+    MSG_TASK_RESULT,
+    MSG_TRAINING_TASK,
+    Ack,
+    ErrorMsg,
+    validate_ack,
+)
 from core.network import P2PNode, send_once, send_message
 
 log = get_logger("peer_messenger")
@@ -187,3 +200,152 @@ class PeerMessenger:
             log.warning(f"PeerMessenger: envio de '{message.get('type')}' falhou")
         else:
             log.debug(f"PeerMessenger: '{message.get('type')}' confirmado pelo servidor")
+
+def _safe_filename(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in value)
+
+
+def _short_id(value: str, size: int = 8) -> str:
+    return value[:size] + ("…" if len(value) > size else "")
+
+
+def _atomic_pickle_dump(value: Any, target: Path, lock: Optional[threading.Lock] = None) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_suffix(target.suffix + ".tmp")
+
+    def _write() -> None:
+        with temp.open("wb") as handle:
+            pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp.replace(target)
+
+    if lock is None:
+        _write()
+    else:
+        with lock:
+            _write()
+
+
+class ReliablePeerMessenger(PeerMessenger):
+    """PeerMessenger com spool em disco e retry para TaskResult.
+
+    O PeerMessenger padrão não garante que um TaskResult chegue ao servidor
+    (o worker de saída tenta uma vez e segue em frente). Esta variante mantém
+    TaskResult em disco até receber Ack com ref_type/ref_id corretos,
+    reenviando com backoff exponencial enquanto não houver confirmação.
+    Mensagens não críticas continuam apenas em memória.
+    """
+
+    def __init__(
+        self,
+        node_id: str,
+        server_ip: str,
+        server_port: int,
+        spool_dir: Path,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ) -> None:
+        super().__init__(
+            node_id=node_id,
+            server_ip=server_ip,
+            server_port=server_port,
+            loop=loop,
+        )
+        self.spool_dir = spool_dir
+        self.spool_dir.mkdir(parents=True, exist_ok=True)
+        self._spool_lock = threading.Lock()
+
+    def send(self, message: Dict[str, Any]) -> None:
+        envelope: Dict[str, Any] = {"message": message, "spool_path": None}
+        if message.get("type") == MSG_TASK_RESULT:
+            task_id = str(message.get("task_id") or uuid.uuid4())
+            spool_path = self.spool_dir / f"task_result_{_safe_filename(task_id)}.pkl"
+            _atomic_pickle_dump(message, spool_path, lock=self._spool_lock)
+            envelope["spool_path"] = str(spool_path)
+        self._outbound_queue.put(envelope)
+
+    def restore_pending_results(self) -> int:
+        restored = 0
+        for path in sorted(self.spool_dir.glob("task_result_*.pkl")):
+            try:
+                with path.open("rb") as handle:
+                    message = pickle.load(handle)
+                if not isinstance(message, dict) or message.get("type") != MSG_TASK_RESULT:
+                    raise ValueError("spool não contém TaskResult")
+            except Exception as exc:
+                quarantine = path.with_suffix(path.suffix + ".corrupt")
+                path.replace(quarantine)
+                print(f"[WARNING] Spool corrompido movido para {quarantine}: {exc}")
+                continue
+            self._outbound_queue.put(
+                {"message": message, "spool_path": str(path)}
+            )
+            restored += 1
+        if restored:
+            print(f"[RECOVERY] {restored} resultado(s) pendente(s) restaurado(s)")
+        return restored
+
+    def _outbound_worker(self) -> None:
+        print("[MESSENGER] Worker de saída confiável iniciado")
+        while not self._stop_event.is_set():
+            try:
+                envelope = self._outbound_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            message = envelope.get("message", envelope)
+            spool_raw = envelope.get("spool_path")
+            spool_path = Path(spool_raw) if spool_raw else None
+            attempt = 0
+            delivered = False
+
+            try:
+                while not self._stop_event.is_set() and not delivered:
+                    attempt += 1
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._send_checked(message), self.loop
+                    )
+                    try:
+                        delivered = bool(future.result(timeout=20.0))
+                    except Exception as exc:
+                        print(
+                            f"[WARNING] Falha ao enviar {message.get('type')} "
+                            f"(tentativa {attempt}): {exc}"
+                        )
+                        delivered = False
+
+                    if not delivered and not self._stop_event.is_set():
+                        delay = min(30.0, 1.0 * (2 ** min(attempt - 1, 5)))
+                        print(
+                            f"[RETRY] {message.get('type')} preservado; "
+                            f"nova tentativa em {delay:.0f}s"
+                        )
+                        self._stop_event.wait(delay)
+
+                if delivered and spool_path is not None:
+                    with contextlib.suppress(FileNotFoundError):
+                        spool_path.unlink()
+                    print(
+                        f"[DELIVERY] TaskResult {_short_id(str(message.get('task_id')))} "
+                        "confirmado e removido do spool"
+                    )
+            finally:
+                self._outbound_queue.task_done()
+
+        print("[MESSENGER] Worker de saída confiável encerrado")
+
+    async def _send_checked(self, message: Dict[str, Any]) -> bool:
+        reply = await send_once(
+            self.server_ip,
+            self.server_port,
+            message,
+            expect_reply=True,
+            timeout=10.0,
+        )
+        if message.get("type") == MSG_TASK_RESULT:
+            return validate_ack(
+                reply,
+                expected_ref_type=MSG_TASK_RESULT,
+                expected_ref_id=str(message.get("task_id") or ""),
+            )
+        return reply is not None and reply.get("type") != MSG_ERROR

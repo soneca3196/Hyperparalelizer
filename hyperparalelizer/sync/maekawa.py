@@ -11,6 +11,19 @@ class MaekawaTimeoutError(Exception):
     pass
 
 
+class NoOpMutex:
+    """Mutex nulo, usado quando a exclusão mútua distribuída está desabilitada
+    (ex.: flag --disable-maekawa em ambiente de teste/depuração)."""
+
+    state = "RELEASED"
+
+    async def request_access(self) -> None:
+        self.state = "HELD"
+
+    async def release_access(self) -> None:
+        self.state = "RELEASED"
+
+
 class MaekawaMutex:
     # Configuração padrão de timeout/retry para aquisição do lock
     DEFAULT_GRANT_TIMEOUT = 10.0   # segundos por tentativa
