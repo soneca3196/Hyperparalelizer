@@ -1679,6 +1679,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def async_main() -> None:
+    args = parser.parse_args()
     parser = build_parser()
     parser.add_argument("--max-task-retries", type=int, default=3, help="Limite de tentativas por tarefa")
     if args.mode == "server":
