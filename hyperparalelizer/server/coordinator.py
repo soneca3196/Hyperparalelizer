@@ -19,7 +19,8 @@ from core.network import send_once
 from core.pubsub import TOPIC_GLOBAL_BEST_SCORE
 from hyperparalelizer.global_table import GlobalTable, ServerState
 from utils.logger import get_logger
-from utils.protocol import MSG_ACK, PubSubPublish, TrainingTask
+from utils.protocol import MSG_ACK, MSG_SYNC_STATE, PubSubPublish, TrainingTask
+from hyperparalelizer.server.pupil_manager import PupilManager
 
 log = get_logger("coordinator")
 
@@ -56,6 +57,7 @@ class Coordinator:
         
         # Referência ao peer pupilo (se existir)
         self.pupil_peer: Optional[Dict[str, Any]] = None
+        self.pupil_manager = PupilManager(self)
 
     def get_best_model(self) -> Optional[Dict[str, Any]]:
         best = self.GlobalTable.get_best_model()
@@ -109,6 +111,31 @@ class Coordinator:
         task = self.assign_hyperparameters_to_peer(peer)
 
         return node_id, fragment_id, task
+
+    def build_peer_list(self, exclude_node_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self.GlobalTable.lock:
+            nodes = list(self.GlobalTable.nodes.values())
+        return [
+            {"id_node": n["node_id"], "ip": n["ip"], "port": n["port"]}
+            for n in nodes
+            if n["node_id"] != exclude_node_id
+        ]
+
+    async def broadcast_membership_update(self) -> None:
+        with self.GlobalTable.lock:
+            nodes = list(self.GlobalTable.nodes.values())
+        membership_epoch = len(nodes)
+        sends = []
+        for node in nodes:
+            peers_for_node = self.build_peer_list(exclude_node_id=node["node_id"])
+            msg = {
+                "type": "MembershipUpdate",
+                "epoch": membership_epoch,
+                "peers": peers_for_node,
+            }
+            sends.append(send_once(node["ip"], node["port"], msg, expect_reply=False, timeout=5.0))
+        if sends:
+            await asyncio.gather(*sends, return_exceptions=True)
     
     # GRID SEARCH                                              
     def generate_grid_search(self, hyperparameters: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
@@ -242,9 +269,10 @@ class Coordinator:
         devolvida ao início de task_pool para ser reatribuída.
         Retorna True se a tarefa foi aceita pelo peer.
         """
-        task = self.assign_hyperparameters_to_peer(peer)
+        task = self.GlobalTable.reserve_next_task_for_peer(peer)
         if task is None:
-            return False  # fila vazia
+            return False  # fila vazia ou peer já ocupado
+        peer.hyperparameters = task.parametros
 
         reply = await send_once(
             peer.ip,
@@ -278,12 +306,16 @@ class Coordinator:
         return True
 
     async def dispatch_all_idle(self) -> List[str]:
-        """Envia tarefas para todos os peers ociosos"""
+        """Envia tarefas para todos os peers ociosos e prontos (ready=True)"""
         with self.GlobalTable.lock:
             busy_ids = {entry["peer"].id_node for entry in self.GlobalTable.assigned_tasks.values()}
             all_nodes = list(self.GlobalTable.nodes.values())
 
-        idle_peers = [node["metadata"] for node in all_nodes if node["node_id"] not in busy_ids]
+        idle_peers = [
+            node["metadata"]
+            for node in all_nodes
+            if node["node_id"] not in busy_ids and node.get("ready") is True
+        ]
 
         dispatched: List[str] = []
         for peer in idle_peers:
@@ -452,15 +484,24 @@ class Coordinator:
 
         ip = pupil_peer.get('ip')
         port = pupil_peer.get('port')
+        pupil_id = pupil_peer.get('id_node')
         if ip is None or port is None:
             return False
 
-        # Pega o snapshot completo diretamente da GlobalTable (stateless)
+        snapshot_id = uuid.uuid4().hex
         msg = {
-            "type": "SyncState",
+            "type": MSG_SYNC_STATE,
             "id_node": "server",
-            "global_table_snapshot": self.GlobalTable.get_snapshot()
+            "snapshot_id": snapshot_id,
+            "pupil_id": pupil_id,
+            "pupil_epoch": self.GlobalTable.pupil_epoch,
+            "global_table_snapshot": self.GlobalTable.get_snapshot(),
         }
 
-        await send_once(ip, port, msg, expect_reply=False)
-        return True
+        reply = await send_once(ip, port, msg, expect_reply=True, timeout=5.0)
+        return (
+            isinstance(reply, dict)
+            and reply.get("type") == MSG_ACK
+            and reply.get("ref_type") == MSG_SYNC_STATE
+            and str(reply.get("ref_id") or "") == snapshot_id
+        )

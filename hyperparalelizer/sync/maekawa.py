@@ -37,6 +37,10 @@ class MaekawaMutex:
     ):
         """Peer invoca isso antes de tentar atualizar o best_model
         """
+        if not self.quorum:
+            self.state = "HELD"
+            return
+
         self.state = "WANTED"
         self.granted_by = set()
         self.grant_event.clear()
@@ -85,11 +89,22 @@ class MaekawaMutex:
 
     async def release_access(self):
         """Peer invoca isso após atualizar o best_model."""
+        if not self.quorum:
+            self.state = "RELEASED"
+            return
+
         self.state = "RELEASED"
         msg = {"type": "MaekawaRelease", "id_node": self.node_id}
         
         for peer in self.quorum:
             asyncio.create_task(send_once(peer['ip'], peer['port'], msg, expect_reply=False))
+
+    def replace_quorum(self, peers) -> None:
+        """Atualiza o quórum dinamicamente (usado via MembershipUpdate)."""
+        self.quorum = [
+            p for p in peers
+            if isinstance(p, dict) and p.get("id_node") != self.node_id
+        ]
 
 
     def _get_peer_address(self, target_id: str):

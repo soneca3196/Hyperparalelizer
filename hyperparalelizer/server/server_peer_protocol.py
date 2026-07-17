@@ -38,6 +38,7 @@ from utils.protocol import (
     MSG_DATASET_READY,
     MSG_JOIN_NETWORK,
     MSG_KEEP_ALIVE,
+    MSG_PEER_READY,
     MSG_REQUEST_BEST,
     MSG_REQUEST_FRAGMENT_BACKUP,
     MSG_TASK_RESULT,
@@ -89,6 +90,8 @@ async def handle_join_network(msg: Dict[str, Any], writer: asyncio.StreamWriter,
                        if task else None,)
 
     await send_message(writer, response.to_dict(),)
+
+    asyncio.create_task(coordinator.broadcast_membership_update())
 
     if status_queue is not None:
         await status_queue.put(
@@ -159,8 +162,6 @@ async def handle_task_result(
                 f"f1={(f1_score or 0.0):.4f}"
                 + (" [NOVO MELHOR]" if is_new_best else "")
             )
-        # peer fica livre: despacha próxima tarefa imediatamente
-        asyncio.create_task(coordinator.dispatch_next_task(peer))
     else:
         log.warning(f"TaskResult: task_id desconhecido '{task_id}'")
 
@@ -291,6 +292,25 @@ async def handle_request_fragment_backup(
         f"enviado para {requester[:8] if requester else '?'}…"
     )
 
+async def handle_peer_ready(
+    msg: Dict[str, Any],
+    writer: asyncio.StreamWriter,
+    coordinator: Coordinator,
+    status_queue: Optional[asyncio.Queue] = None,
+) -> None:
+    """Só a partir daqui o peer é elegível em dispatch_all_idle().
+
+    Antes de PeerReady, o servidor pode já ter registrado o peer (via
+    JoinNetwork), mas o listener P2P dele ainda pode não estar de pé.
+    """
+    node_id = msg.get("id_node", "")
+    coordinator.GlobalTable.set_node_ready(node_id, True)
+    ack = Ack(ref_type=MSG_PEER_READY, ref_id=node_id)
+    await send_message(writer, ack.to_dict())
+    if status_queue is not None:
+        await status_queue.put({"event": "peer_ready", "node_id": node_id})
+    log.info(f"PeerReady: {node_id[:8] if node_id else '?'}… apto a receber tarefas")
+
 # KeepAlive                                                       
 async def handle_keep_alive(
     msg: Dict[str, Any],
@@ -317,6 +337,7 @@ def register_all_handlers(
         (MSG_KEEP_ALIVE,             handle_keep_alive),
         (MSG_DATASET_READY,          handle_dataset_ready),
         (MSG_REQUEST_FRAGMENT_BACKUP, handle_request_fragment_backup),
+        (MSG_PEER_READY,             handle_peer_ready),
     ]
     for msg_type, handler_fn in bindings:
         # functools.partial vincula coordinator e status_queue,

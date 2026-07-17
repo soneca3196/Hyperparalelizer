@@ -34,6 +34,8 @@ MSG_FRAGMENT_DATA = "FragmentData"
 MSG_FRAGMENT_NOT_FOUND = "FragmentNotFound"
 MSG_REQUEST_FRAGMENT_BACKUP = "RequestFragmentBackup"
 MSG_FRAGMENT_BACKUP = "FragmentBackup"
+MSG_MEMBERSHIP_UPDATE = "MembershipUpdate"
+MSG_PEER_READY = "PeerReady"
 
 
 @dataclass
@@ -249,9 +251,28 @@ class MaekawaRelease:
 class SyncState:
     id_node: str  # id do servidor
     global_table_snapshot: dict
+    run_id: str = ""
+    pupil_id: str = ""
+    pupil_epoch: int = 0
+    snapshot_id: str = ""
     task_queue_snapshot: list = field(default_factory=list)
     best_model_metrics: dict = field(default_factory=dict)
     type: str = field(default=MSG_SYNC_STATE, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class MembershipUpdate:
+    epoch: int
+    peers: list
+    type: str = field(default=MSG_MEMBERSHIP_UPDATE, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class PeerReady:
+    id_node: str
+    type: str = field(default=MSG_PEER_READY, init=False)
     def to_dict(self): return asdict(self)
 
 
@@ -355,6 +376,6 @@ _TYPE_MAP = {
     MSG_FRAGMENT_NOT_FOUND: FragmentNotFound,
     MSG_REQUEST_FRAGMENT_BACKUP: RequestFragmentBackup,
     MSG_FRAGMENT_BACKUP: FragmentBackupData,
+    MSG_MEMBERSHIP_UPDATE: MembershipUpdate,
+    MSG_PEER_READY: PeerReady,
 }
-
-

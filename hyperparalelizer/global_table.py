@@ -24,6 +24,8 @@ class GlobalTable:
         self.best_model = None
         self.task_pool = []
         self.assigned_tasks = {} # task_id -> {node_id, task, timestamp}
+        self.pupil_id = None
+        self.pupil_epoch = 0
         
         if snapshot is not None:
             self.overwrite_from_snapshot(snapshot)
@@ -98,7 +100,9 @@ class GlobalTable:
                 "system_state": self._system_state.name,
                 "best_model": self.best_model.copy() if self.best_model else None,
                 "task_pool": task_pool_serialized,
-                "assigned_tasks": assigned_tasks_serialized.copy()
+                "assigned_tasks": assigned_tasks_serialized.copy(),
+                "pupil_id": self.pupil_id,
+                "pupil_epoch": self.pupil_epoch,
             }
         
     def overwrite_from_snapshot(self, snapshot):
@@ -119,6 +123,8 @@ class GlobalTable:
             self.fragments_locations = snapshot.get("fragments_locations", {})
             self.system_state = snapshot.get("system_state", "HASHING")
             self.best_model = snapshot.get("best_model", None)
+            self.pupil_id = snapshot.get("pupil_id", None)
+            self.pupil_epoch = snapshot.get("pupil_epoch", 0)
 
             # Reconstruir task_pool (dicionario para TrainningTask)
             self.task_pool = []
@@ -178,6 +184,44 @@ class GlobalTable:
             for fragment_name in self.fragments_locations:
                 if node_id in self.fragments_locations[fragment_name]:
                     self.fragments_locations[fragment_name].remove(node_id)
+
+    def set_node_ready(self, node_id, ready=True):
+        with self.lock:
+            if node_id in self.nodes:
+                self.nodes[node_id]["ready"] = ready
+
+    def get_idle_peers(self):
+        with self.lock:
+            return [
+                n for n in self.nodes.values()
+                if n.get("ready") is True
+                and n["node_id"] not in {
+                    info.get("peer_id") for info in self.assigned_tasks.values()
+                }
+            ]
+
+    def reserve_next_task_for_peer(self, peer):
+        import time
+        with self.lock:
+            peer_id = getattr(peer, "id_node", None) or (
+                peer.get("id_node") if isinstance(peer, dict) else None
+            )
+            already_busy = any(
+                getattr(entry.get("peer"), "id_node", None) == peer_id
+                or (isinstance(entry.get("peer"), dict) and entry["peer"].get("id_node") == peer_id)
+                for entry in self.assigned_tasks.values()
+            )
+            if already_busy or not self.task_pool:
+                return None
+
+            task = self.task_pool.pop(0)
+            task_id = task.task_id if hasattr(task, "task_id") else task.get("task_id")
+            self.assigned_tasks[task_id] = {
+                "peer": peer,
+                "task": task,
+                "timestamp": time.monotonic(),
+            }
+            return task
 
     # adiciona a localização de um fragmento (nome do fragmento) associada a um nó (node_id)
     def add_fragment_location(self, fragment_name, node_id):

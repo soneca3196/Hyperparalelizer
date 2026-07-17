@@ -59,6 +59,7 @@ def test_scheduler_loop_dispatches_pending_tasks_and_requeues_timeouts():
         peer = Peer(ip="127.0.0.1", port=9002)
         node_id = table.add_node(peer.ip, peer.port, peer)
         peer.id_node = node_id
+        table.set_node_ready(node_id, True)
 
         task = TrainingTask(
             task_id="task-3",

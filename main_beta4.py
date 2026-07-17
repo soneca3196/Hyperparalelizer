@@ -33,7 +33,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import numpy as np
 from sklearn.datasets import load_breast_cancer
 
-from core.network import P2PNode, send_once
+from core.network import P2PNode, send_message, send_once
 from hyperparalelizer.global_table import GlobalTable
 from hyperparalelizer.ml.dataset_loader import DatasetLoader
 from hyperparalelizer.peer.data_thread import DataThread
@@ -58,17 +58,22 @@ from hyperparalelizer.server.server_peer_protocol import (
 from hyperparalelizer.sync.bully import BullyElection
 from hyperparalelizer.sync.maekawa import MaekawaMutex, MaekawaTimeoutError
 from utils.protocol import (
+    Ack,
     DatasetReady,
+    ErrorMsg,
     KeepAlive,
     MSG_ACK,
     MSG_ERROR,
     MSG_JOIN_ACK,
     MSG_KEEP_ALIVE,
+    MSG_MEMBERSHIP_UPDATE,
+    MSG_PEER_READY,
     MSG_PUBSUB_NOTIFY,
     MSG_PUBSUB_PUBLISH,
     MSG_SYNC_STATE,
     MSG_TASK_RESULT,
     MSG_TRAINING_TASK,
+    PeerReady,
     PubSubNotify,
 )
 
@@ -187,33 +192,11 @@ class NoOpMutex:
         self.state = "RELEASED"
 
 
-class SafeMaekawaMutex(MaekawaMutex):
-    """Maekawa real com otimização correta para quórum unitário/vazio.
-
-    Um peer sem outros membros conhecidos possui acesso exclusivo trivial.
-    Isso evita o timeout infinito do Maekawa atual quando quorum == [].
-    O quórum continua limitado à lista de peers recebida no JoinAck; atualização
-    dinâmica exige uma mensagem de membership ainda inexistente no protocolo.
-    """
-
-    async def request_access(
-        self,
-        timeout: float = MaekawaMutex.DEFAULT_GRANT_TIMEOUT,
-        max_retries: int = MaekawaMutex.DEFAULT_MAX_RETRIES,
-    ) -> None:
-        if not self.quorum:
-            self.state = "HELD"
-            return
-        await super().request_access(timeout=timeout, max_retries=max_retries)
-
-    async def release_access(self) -> None:
-        if not self.quorum:
-            self.state = "RELEASED"
-            return
-        await super().release_access()
-
-    def replace_quorum(self, peers: Iterable[Dict[str, Any]]) -> None:
-        self.quorum = normalize_peers(peers, exclude_node_id=self.node_id)
+MAEKAWA_NOTE = (
+    "Fix #4: a otimização de quórum vazio/trivial e replace_quorum() dinâmico "
+    "agora vivem em hyperparalelizer.sync.maekawa.MaekawaMutex; a main usa a "
+    "classe diretamente, sem subclasses."
+)
 
 
 class ValidatingDatasetLoader(DatasetLoader):
@@ -453,34 +436,6 @@ class ReliablePeerMessenger(PeerMessenger):
         return reply is not None and reply.get("type") != MSG_ERROR
 
 
-class GuardedTrainerNode(TrainerNode):
-    """Garante liberação do Maekawa quando o Trainer atual falha."""
-
-    async def handle_training_task(self, task: Dict[str, Any]) -> None:
-        try:
-            await super().handle_training_task(task)
-        except MaekawaTimeoutError as exc:
-            print(f"[MAEKAWA ERROR] {exc}")
-            self._send_result(
-                task,
-                metrics=None,
-                model_bytes=None,
-                error="maekawa_timeout",
-            )
-        except Exception as exc:
-            print(
-                f"[TRAINING ERROR] Tarefa {task.get('task_id')} abortada: {exc}"
-            )
-            self._send_result(
-                task,
-                metrics=None,
-                model_bytes=None,
-                error=str(exc),
-            )
-        finally:
-            if getattr(self.maekawa_mutex, "state", None) == "HELD":
-                with contextlib.suppress(Exception):
-                    await self.maekawa_mutex.release_access()
 
 
 @dataclass
@@ -784,31 +739,6 @@ async def cancel_tasks(tasks: Iterable[asyncio.Task[Any]]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def install_dispatch_guard(coordinator: Coordinator) -> None:
-    """Serializa dispatches por peer e impede reserva dupla.
-
-    handle_task_result() agenda dispatch_next_task(), enquanto o scheduler pode
-    chamar dispatch_all_idle() no mesmo instante. O Coordinator atual não faz a
-    segunda checagem dentro de dispatch_next_task; esta proteção envolve o
-    método existente sem alterar sua lógica de envio/rollback.
-    """
-    original_dispatch = coordinator.dispatch_next_task
-    locks: Dict[str, asyncio.Lock] = {}
-
-    async def guarded_dispatch(peer: Any) -> bool:
-        peer_id = str(getattr(peer, "id_node", "") or "unknown")
-        lock = locks.setdefault(peer_id, asyncio.Lock())
-        async with lock:
-            with coordinator.GlobalTable.lock:
-                already_busy = any(
-                    getattr(entry.get("peer"), "id_node", None) == peer_id
-                    for entry in coordinator.GlobalTable.assigned_tasks.values()
-                )
-            if already_busy:
-                return False
-            return await original_dispatch(peer)
-
-    coordinator.dispatch_next_task = guarded_dispatch  # type: ignore[method-assign]
 
 
 def server_progress_snapshot(runtime: ServerRuntime) -> Tuple[int, int, int, int]:
@@ -837,16 +767,6 @@ def is_formally_complete(runtime: ServerRuntime) -> bool:
     )
 
 
-def select_pupil(coordinator: Coordinator) -> Optional[Dict[str, Any]]:
-    nodes = coordinator.GlobalTable.get_all_nodes()
-    if not nodes:
-        return None
-    winner = max(nodes, key=lambda node: str(node.get("node_id") or ""))
-    return {
-        "id_node": winner.get("node_id"),
-        "ip": winner.get("ip"),
-        "port": winner.get("port"),
-    }
 
 
 async def status_consumer(runtime: ServerRuntime) -> None:
@@ -871,12 +791,13 @@ async def status_consumer(runtime: ServerRuntime) -> None:
                     f"task={event.get('task_id')}"
                 )
                 if not runtime.args.disable_pupil:
-                    pupil = select_pupil(runtime.coordinator)
-                    runtime.coordinator.pupil_peer = pupil
-                    if pupil is not None:
+                    changed = await runtime.coordinator.pupil_manager.reconcile()
+                    pupil = runtime.coordinator.pupil_peer
+                    if changed and pupil is not None:
                         print(
                             f"[PUPIL] Peer de backup atual: "
-                            f"{short_id(str(pupil.get('id_node')))}"
+                            f"{short_id(str(pupil.get('id_node')))} "
+                            f"(epoch={runtime.coordinator.pupil_manager.epoch})"
                         )
 
             elif event_name == "task_result":
@@ -974,8 +895,8 @@ async def pupil_sync_service(runtime: ServerRuntime, interval: float = 2.0) -> N
     last_confirmed: Optional[str] = None
     while not runtime.stop_event.is_set():
         await asyncio.sleep(interval)
-        pupil = select_pupil(runtime.coordinator)
-        runtime.coordinator.pupil_peer = pupil
+        await runtime.coordinator.pupil_manager.reconcile()
+        pupil = runtime.coordinator.pupil_peer
         if pupil is None:
             continue
         try:
@@ -1175,7 +1096,6 @@ async def run_server(args: argparse.Namespace) -> None:
         pubsub_queue=pubsub_queue,
         task_timeout=args.task_timeout,
     )
-    install_dispatch_guard(coordinator)
     fragment_ids = coordinator.fragment_dataset(n_fragments=args.fragments)
     if len(fragment_ids) != args.fragments:
         raise BootstrapError(
@@ -1348,7 +1268,7 @@ async def peer_heartbeat_loop(
 async def promoted_server_from_peer(
     args: argparse.Namespace,
     node_id: str,
-    trainer: GuardedTrainerNode,
+    trainer: TrainerNode,
     p2p_node: P2PNode,
     p2p_task: asyncio.Task[Any],
     messenger: ReliablePeerMessenger,
@@ -1376,7 +1296,6 @@ async def promoted_server_from_peer(
     await asyncio.to_thread(messenger.stop)
 
     coordinator = trainer.promote_to_server()
-    install_dispatch_guard(coordinator)
     # O peer promovido deixa de ser executor. Sua tarefa em andamento, se
     # ainda constar no snapshot, é reenfileirada pelo método existente.
     coordinator.handle_peer_failure(node_id)
@@ -1455,7 +1374,7 @@ async def run_peer(args: argparse.Namespace) -> None:
     if args.disable_maekawa:
         mutex: Any = NoOpMutex()
     else:
-        mutex = SafeMaekawaMutex(node_id=join.node_id, quorum=join.peers)
+        mutex = MaekawaMutex(node_id=join.node_id, quorum=join.peers)
         print(f"[MAEKAWA] Quórum inicial com {len(join.peers)} peer(s)")
 
     loop = asyncio.get_running_loop()
@@ -1466,7 +1385,7 @@ async def run_peer(args: argparse.Namespace) -> None:
         spool_dir=spool_dir,
         loop=loop,
     )
-    trainer = GuardedTrainerNode(
+    trainer = TrainerNode(
         node_id=join.node_id,
         messenger=messenger,
         data_thread=data_thread,
@@ -1501,26 +1420,53 @@ async def run_peer(args: argparse.Namespace) -> None:
     async def handle_sync_state(
         msg: Dict[str, Any], writer: asyncio.StreamWriter
     ) -> None:
+        snapshot_id = str(msg.get("snapshot_id") or "")
+        pupil_id = str(msg.get("pupil_id") or "")
+        pupil_epoch = int(msg.get("pupil_epoch") or 0)
+
+        if pupil_epoch < trainer.pupil_epoch:
+            await send_message(
+                writer,
+                ErrorMsg(code="STALE_SYNC_STATE", detail=snapshot_id).to_dict(),
+            )
+            return
+
+        trainer.pupil_epoch = pupil_epoch
+
+        if pupil_id != join.node_id:
+            trainer.is_pupil = False
+            trainer.replica_global_table_snapshot = {}
+            with contextlib.suppress(Exception):
+                await send_message(
+                    writer,
+                    Ack(ref_type=MSG_SYNC_STATE, ref_id=snapshot_id).to_dict(),
+                )
+            return
+
+        trainer.is_pupil = True
         trainer.handle_sync_state(msg)
-        snapshot = msg.get("global_table_snapshot") or {}
-        nodes = snapshot.get("nodes") or {}
-        peer_list = [
-            {
-                "id_node": node_id,
-                "ip": info.get("ip"),
-                "port": info.get("port"),
-            }
-            for node_id, info in nodes.items()
-            if node_id != join.node_id and isinstance(info, dict)
-        ]
-        normalized = normalize_peers(peer_list, exclude_node_id=join.node_id)
+        await send_message(
+            writer, Ack(ref_type=MSG_SYNC_STATE, ref_id=snapshot_id).to_dict()
+        )
+
+    async def handle_membership_update(
+        msg: Dict[str, Any], writer: asyncio.StreamWriter
+    ) -> None:
+        peers = msg.get("peers") or []
+        normalized = normalize_peers(peers, exclude_node_id=join.node_id)
         data_thread.update_known_peers(normalized)
-        if isinstance(mutex, SafeMaekawaMutex):
+        if hasattr(mutex, "replace_quorum"):
             mutex.replace_quorum(normalized)
         if bully is not None:
             bully.peers = build_bully_peer_map(normalized)
-        # replicate_state_to_pupil envia com expect_reply=False; não responde.
-        del writer
+        with contextlib.suppress(Exception):
+            await send_message(
+                writer,
+                Ack(
+                    ref_type=MSG_MEMBERSHIP_UPDATE,
+                    ref_id=str(msg.get("epoch") or ""),
+                ).to_dict(),
+            )
 
     async def handle_pubsub_notify(
         msg: Dict[str, Any], writer: asyncio.StreamWriter
@@ -1537,6 +1483,7 @@ async def run_peer(args: argparse.Namespace) -> None:
         del writer
 
     p2p_node.register_handler(MSG_SYNC_STATE, handle_sync_state)
+    p2p_node.register_handler(MSG_MEMBERSHIP_UPDATE, handle_membership_update)
     if not args.disable_pubsub:
         p2p_node.register_handler(MSG_PUBSUB_NOTIFY, handle_pubsub_notify)
 
@@ -1579,6 +1526,20 @@ async def run_peer(args: argparse.Namespace) -> None:
     await wait_for_listener(args.host, args.port)
     print(f"[READY] Peer P2P escutando em {args.host}:{args.port}")
 
+    ready_reply = await send_once(
+        args.server_host,
+        args.server_port,
+        PeerReady(id_node=join.node_id).to_dict(),
+        expect_reply=True,
+        timeout=10.0,
+    )
+    if validate_ack(
+        ready_reply, expected_ref_type=MSG_PEER_READY, expected_ref_id=join.node_id
+    ):
+        print("[READY] PeerReady confirmado; apto a receber tarefas do servidor")
+    else:
+        print("[WARNING] Servidor não confirmou PeerReady")
+
     stop_event = asyncio.Event()
     heartbeat_task = create_task(
         peer_tasks,
@@ -1596,10 +1557,9 @@ async def run_peer(args: argparse.Namespace) -> None:
 
     if join.initial_task is not None:
         # A tarefa já foi reservada por Coordinator.add_peer e veio no JoinAck.
-        # Nenhum dispatch extra é solicitado durante o bootstrap.
         create_task(
             peer_tasks,
-            trainer.handle_training_task(join.initial_task),
+            trainer.try_submit_task(join.initial_task),
             "peer-initial-training-task",
         )
 

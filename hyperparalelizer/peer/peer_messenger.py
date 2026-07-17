@@ -7,7 +7,7 @@ import threading
 from typing import Any, Dict, Optional
 
 from utils.logger import get_logger
-from utils.protocol import MSG_TRAINING_TASK, MSG_REQUEST_BEST, Ack
+from utils.protocol import MSG_TRAINING_TASK, MSG_REQUEST_BEST, Ack, ErrorMsg
 from core.network import P2PNode, send_once, send_message
 
 log = get_logger("peer_messenger")
@@ -71,15 +71,27 @@ class PeerMessenger:
     async def _handle_training_task(
         self, msg: Dict[str, Any], writer: asyncio.StreamWriter
     ) -> None:
-        # confirma recebimento sem esperar o treino terminar
-        ack = Ack(ref_type=MSG_TRAINING_TASK, ref_id=msg.get("task_id", "")).to_dict()
-        await send_message(writer, ack)
+        task_id = str(msg.get("task_id") or "")
 
         if self.trainer is None:
             log.error("PeerMessenger: TrainingTask recebida sem trainer")
+            await send_message(
+                writer, ErrorMsg(code="NO_TRAINER", detail=task_id).to_dict()
+            )
             return
 
-        asyncio.create_task(self.trainer.handle_training_task(msg))
+        accepted = await self.trainer.try_submit_task(msg)
+        if not accepted:
+            log.warning(
+                f"PeerMessenger: task '{task_id}' rejeitada (peer ocupado ou duplicada)"
+            )
+            await send_message(
+                writer, ErrorMsg(code="PEER_BUSY", detail=task_id).to_dict()
+            )
+            return
+
+        ack = Ack(ref_type=MSG_TRAINING_TASK, ref_id=task_id).to_dict()
+        await send_message(writer, ack)
 
     async def _handle_request_best_model(
         self, msg: Dict[str, Any], writer: asyncio.StreamWriter
