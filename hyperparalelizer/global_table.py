@@ -1,15 +1,149 @@
+# "container" thread-safe para variaveis de dicionários e listas críticos
+
 import hashlib
+import pickle
 import threading
+from enum import Enum
+from dataclasses import asdict
+from pathlib import Path
+
+class ServerState(Enum):
+    HASHING = 0
+    OPEN = 1
+    DATASET_DISTRIBUTION = 2
+    MODEL_DISTRIBUTION = 3
 
 class GlobalTable:
-    def __init__(self):
-        # tabela para mapear: hash(IP+Porta) -> Metadados do Nó
-        self.nodes = {}
-        # tabela para mapear: hash(Nome do Fragmento) -> lista de IPs/IDs
-        self.fragments_dataset = {}
+    def __init__(self, snapshot=None):
+        self.lock = threading.Lock() # garante que duas threads nao modifiquem a GlobalTable ao mesmo tempo
         
-        # garanti que duas threads nao modifiquem a GlobalTable ao mesmo tempo
-        self.lock = threading.Lock()
+        self.nodes = {} # tabela para mapear: hash(IP+Porta) -> Metadados do Nó
+        self.fragments_payloads = {} # Conteudo Real do Fragmento
+        self.fragments_locations = {} # Localizacao do Fragmentos na rede de peers
+        self._system_state = ServerState.HASHING
+        self.best_model = None
+        self.task_pool = []
+        self.assigned_tasks = {} # task_id -> {node_id, task, timestamp}
+        self.pupil_id = None
+        self.pupil_epoch = 0
+        
+        if snapshot is not None:
+            self.overwrite_from_snapshot(snapshot)
+            return
+
+    @property
+    def system_state(self) -> ServerState:
+        return self._system_state
+
+    @system_state.setter
+    def system_state(self, value):
+        if isinstance(value, ServerState):
+            self._system_state = value
+        elif isinstance(value, str):
+            try:
+                self._system_state = ServerState[value]
+            except KeyError:
+                raise ValueError(
+                    f"system_state inválido: {value!r}. "
+                    f"Esperado um dos: {[s.name for s in ServerState]}"
+                )
+        else:
+            raise TypeError(
+                f"system_state deve ser ServerState ou str, recebeu {type(value)}"
+            )
+
+    def set_best_model(self, model_data):
+        with self.lock:
+            self.best_model = model_data
+
+    def get_best_model(self):
+        with self.lock:
+            return self.best_model
+
+
+    def get_snapshot(self, include_fragment_payloads: bool = True):
+        """Retorna uma cópia limpa de todo o estado para enviar ao pupilo
+        """
+        with self.lock:
+            # Serializa os nós (Convertendo Peer em dicionário)
+            nodes_serialized = {}
+            for k, v in self.nodes.items():
+                node_copy = v.copy()
+                if hasattr(node_copy.get("metadata"), "__dataclass_fields__"):
+                    node_copy["metadata"] = asdict(node_copy["metadata"])
+                nodes_serialized[k] = node_copy
+
+
+            # Serializa a fila de tarefas (Convertendo TrainningTask em dicionário)
+            task_pool_serialized = [
+                t.to_dict() if hasattr(t, "to_dict") else t 
+                for t in self.task_pool
+            ]
+
+            # Serializa as tarefas atribuídas 
+            assigned_tasks_serialized = {}
+            for k, v in self.assigned_tasks.items():
+                task_info = v.copy()
+                if hasattr(task_info.get("peer"), "__dataclass_fields__"):
+                    task_info["peer"] = asdict(task_info["peer"])
+                if hasattr(task_info.get("task"), "to_dict"):
+                    task_info["task"] = task_info["task"].to_dict()
+                assigned_tasks_serialized[k] = task_info
+
+            return {
+                "nodes": nodes_serialized,
+                "fragments_payloads": (
+                    self.fragments_payloads.copy() if include_fragment_payloads else {}
+                ),
+                "fragments_locations": {k: list(v) for k, v in self.fragments_locations.items()},
+                
+                "system_state": self._system_state.name,
+                "best_model": self.best_model.copy() if self.best_model else None,
+                "task_pool": task_pool_serialized,
+                "assigned_tasks": assigned_tasks_serialized.copy(),
+                "pupil_id": self.pupil_id,
+                "pupil_epoch": self.pupil_epoch,
+            }
+        
+    def overwrite_from_snapshot(self, snapshot):
+        """Usado pelo pupilo para assumir o estado se o mestre cair."""
+        from hyperparalelizer.server.coordinator import Peer
+        from utils.protocol import from_dict
+        
+        # Reconstruir nos (dicionario para Peer)
+        with self.lock:
+            self.nodes = {}
+            for k, v in snapshot.get("nodes", {}).items():
+                node_data = v.copy()
+                if isinstance(node_data.get("metadata"), dict):
+                    node_data["metadata"] = Peer(**node_data["metadata"])
+                self.nodes[k] = node_data
+
+            self.fragments_payloads = snapshot.get("fragments_payloads", {})
+            self.fragments_locations = snapshot.get("fragments_locations", {})
+            self.system_state = snapshot.get("system_state", "HASHING")
+            self.best_model = snapshot.get("best_model", None)
+            self.pupil_id = snapshot.get("pupil_id", None)
+            self.pupil_epoch = snapshot.get("pupil_epoch", 0)
+
+            # Reconstruir task_pool (dicionario para TrainningTask)
+            self.task_pool = []
+            for t in snapshot.get("task_pool", []):
+                if isinstance(t, dict) and "type" in t:
+                    self.task_pool.append(from_dict(t))
+                else:
+                    self.task_pool.append(t)
+
+            # Reconstruir assigned_tasks (dicionario para Peer e TrainningTask)
+            self.assigned_tasks = {}
+            for k, v in snapshot.get("assigned_tasks", {}).items():
+                task_info = v.copy()
+                if isinstance(task_info.get("peer"), dict):
+                    task_info["peer"] = Peer(**task_info["peer"])
+                if isinstance(task_info.get("task"), dict) and "type" in task_info["task"]:
+                    task_info["task"] = from_dict(task_info["task"])
+                self.assigned_tasks[k] = task_info
+
 
     # gera o hash sha256 dado o ip + porta ou nome do fragmento
     def generate_hash(self, key_string):
@@ -17,13 +151,15 @@ class GlobalTable:
 
     # adiciona um no a GlobalTable, armazenando seu IP, porta e metadados
     def add_node(self, ip, port, metadata):
+        ''' Adiciona node a table, e retorna o node_id para administração interna do coordinator'''
         node_id = self.generate_hash(f"{ip}:{port}")
         
         with self.lock: # bloqueia para outras threads enquanto escreve
             self.nodes[node_id] = {
+                "node_id": node_id,
                 "ip": ip,
                 "port": port,
-                "metadata": metadata # ex: {"ram": "8GB", "cpu_usage": "20%"}
+                "metadata": metadata # dados Peer
             }
         return node_id
 
@@ -44,80 +180,76 @@ class GlobalTable:
             if node_id in self.nodes:
                 del self.nodes[node_id]
             
-            # 2. Remove o nó de todos os fragmentos que ele possuía
-            for frag_id in self.fragments_dataset:
-                if node_id in self.fragments_dataset[frag_id]:
-                    self.fragments_dataset[frag_id].remove(node_id)
+            # 2. Remove o nó de todas as localizações de fragmentos
+            for fragment_name in self.fragments_locations:
+                if node_id in self.fragments_locations[fragment_name]:
+                    self.fragments_locations[fragment_name].remove(node_id)
+
+    def set_node_ready(self, node_id, ready=True):
+        with self.lock:
+            if node_id in self.nodes:
+                self.nodes[node_id]["ready"] = ready
+
+    def get_idle_peers(self):
+        with self.lock:
+            return [
+                n for n in self.nodes.values()
+                if n.get("ready") is True
+                and n["node_id"] not in {
+                    info.get("peer_id") for info in self.assigned_tasks.values()
+                }
+            ]
+
+    def reserve_next_task_for_peer(self, peer):
+        import time
+        with self.lock:
+            peer_id = getattr(peer, "id_node", None) or (
+                peer.get("id_node") if isinstance(peer, dict) else None
+            )
+            already_busy = any(
+                getattr(entry.get("peer"), "id_node", None) == peer_id
+                or (isinstance(entry.get("peer"), dict) and entry["peer"].get("id_node") == peer_id)
+                for entry in self.assigned_tasks.values()
+            )
+            if already_busy or not self.task_pool:
+                return None
+
+            task = self.task_pool.pop(0)
+            task_id = task.task_id if hasattr(task, "task_id") else task.get("task_id")
+            self.assigned_tasks[task_id] = {
+                "peer": peer,
+                "task": task,
+                "timestamp": time.monotonic(),
+            }
+            return task
 
     # adiciona a localização de um fragmento (nome do fragmento) associada a um nó (node_id)
     def add_fragment_location(self, fragment_name, node_id):
-        frag_id = self.generate_hash(fragment_name)
         
         with self.lock:
-            if frag_id not in self.fragments_dataset:
-                self.fragments_dataset[frag_id] = []
+            if fragment_name not in self.fragments_locations:
+                self.fragments_locations[fragment_name] = []
             
             # evita de dois nos terem o mesmo fragmento repetido na lista
-            if node_id not in self.fragments_dataset[frag_id]:
-                self.fragments_dataset[frag_id].append(node_id)
+            if node_id not in self.fragments_locations[fragment_name]:
+                self.fragments_locations[fragment_name].append(node_id)
             
     # endpoint para obter as localizações de um fragmento dado seu nome
     def get_fragment_locations(self, fragment_name):
-        frag_id = self.generate_hash(fragment_name)
         with self.lock:
-            return self.fragments_dataset.get(frag_id, [])
-        
+            return self.fragments_locations.get(fragment_name, [])
 
-# Teste do GlobalTable
-# if __name__ == "__main__":
-#     import time
+    def persist_state(self, path):
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("wb") as handle:
+            pickle.dump(self.get_snapshot(), handle)
 
-#     print("--- INICIANDO TESTES DA GlobalTable (HYPERPARALELIZER) ---\n")
-    
-#     # instanciando a GlobalTable
-#     GlobalTable = GlobalTable()
-    
-#     # testando a adição de nós
-#     print("Adicionando nós na rede...")
-#     id_barriga = GlobalTable.add_node("192.168.0.10", 5000, {"role": "Coordenador (Barriga)", "ram": "16GB"})
-#     id_madruga1 = GlobalTable.add_node("192.168.0.11", 5001, {"role": "Treinador (Madruga 1)", "ram": "8GB"})
-#     id_madruga2 = GlobalTable.add_node("192.168.0.12", 5001, {"role": "Treinador (Madruga 2)", "ram": "4GB"})
-    
-#     print(f" -> ID Barriga: {id_barriga}")
-#     print(f" -> ID Madruga 1: {id_madruga1}")
-#     print(f" -> ID Madruga 2: {id_madruga2}\n")
-
-#     # listagem de todos os nós ativos
-#     print("Listando todos os nós ativos:")
-#     todos_nos = GlobalTable.get_all_nodes()
-#     for no in todos_nos:
-#         print(f" -> IP: {no['ip']} | Role: {no['metadata']['role']}")
-#     print("")
-
-#     # mapeamento de fragmentos do dataset
-#     print("Distribuindo fragmentos do dataset...")
-#     # 1 pega o fragmento 1 e 2
-#     GlobalTable.add_fragment_location("frag_treino_01.csv", id_madruga1)
-#     GlobalTable.add_fragment_location("frag_treino_02.csv", id_madruga1)
-    
-#     # 2 pega o fragmento 2 (redundância) e 3
-#     GlobalTable.add_fragment_location("frag_treino_02.csv", id_madruga2)
-#     GlobalTable.add_fragment_location("frag_treino_03.csv", id_madruga2)
-    
-#     # verifica onde está o fragmento 2
-#     locais_frag_2 = GlobalTable.get_fragment_locations("frag_treino_02.csv")
-#     print(f" -> O 'frag_treino_02.csv' está salvo nos nós (IDs): {locais_frag_2}\n")
-
-#     # testando a remoção de um nó (caso falha de KeepAlive)
-#     print("Simulando queda do Madruga 1 (KeepAlive falhou)...")
-#     GlobalTable.remove_node(id_madruga1)
-    
-#     # verificando se ele sumiu da lista de nós
-#     nos_restantes = GlobalTable.get_all_nodes()
-#     print(f" -> Quantidade de nós ativos agora: {len(nos_restantes)}")
-    
-#     # verificando se a GlobalTable limpou os fragmentos que pertenciam a ele
-#     locais_frag_2_atualizado = GlobalTable.get_fragment_locations("frag_treino_02.csv")
-#     print(f" -> O 'frag_treino_02.csv' agora está salvo apenas em: {locais_frag_2_atualizado}")
-    
-#     print("\n--- TESTES FINALIZADOS ---")
+    @classmethod
+    def load_state(cls, path):
+        target = Path(path)
+        if not target.exists():
+            raise FileNotFoundError(target)
+        with target.open("rb") as handle:
+            snapshot = pickle.load(handle)
+        return cls(snapshot=snapshot)

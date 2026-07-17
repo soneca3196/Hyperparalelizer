@@ -8,6 +8,7 @@ import time
 
 # Tipo de mensagem
 MSG_JOIN_NETWORK = "JoinNetwork"
+MSG_JOIN_ACK = "JoinAck"
 MSG_FIND_NODE = "FindNode"
 MSG_KEEP_ALIVE = "KeepAlive"
 MSG_TRAINING_TASK = "TrainingTask"
@@ -27,11 +28,18 @@ MSG_BULLY_ELECTION = "BullyElection"
 MSG_BULLY_ALIVE = "BullyAlive"
 MSG_BULLY_COORDINATOR = "BullyCoordinator"
 MSG_SYNC_STATE = "SyncState"
+MSG_DATASET_READY = "DatasetReady"
+MSG_REQUEST_FRAGMENT = "RequestFragment"
+MSG_FRAGMENT_DATA = "FragmentData"
+MSG_FRAGMENT_NOT_FOUND = "FragmentNotFound"
+MSG_REQUEST_FRAGMENT_BACKUP = "RequestFragmentBackup"
+MSG_FRAGMENT_BACKUP = "FragmentBackup"
+MSG_MEMBERSHIP_UPDATE = "MembershipUpdate"
+MSG_PEER_READY = "PeerReady"
 
 
 @dataclass
 class JoinNetwork:
-    id_node: str
     ip: str
     porta: int
     memoria_total_mb: float = 0.0
@@ -40,6 +48,18 @@ class JoinNetwork:
     type: str = field(default=MSG_JOIN_NETWORK, init=False)
 
     def to_dict(self):
+        return asdict(self)
+
+@dataclass
+class JoinAck:
+    node_id: str
+    fragment_id: Optional[str]
+    peers: List[Dict[str, Any]]
+    run_id: str
+    task: Optional[Dict[str, Any]] = None
+    type: str = field(default=MSG_JOIN_ACK, init=False)
+
+    def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
 
@@ -72,6 +92,7 @@ class TrainingTask:
     parametros: Dict[str, Any]
     model_type: str
     model_config: Dict[str, Any] = field(default_factory=dict)
+    run_id: str = ""
 
     type: str = field(default=MSG_TRAINING_TASK, init=False)
 
@@ -83,12 +104,16 @@ class TrainingTask:
 class TaskResult:
     task_id: str
     id_node: str
-    accuracy: float
-    precision: float
-    recall: float
-    f1_score: float
-    roc_auc: float
+    accuracy: Optional[float] = None
+    precision: Optional[float] = None
+    recall: Optional[float] = None
+    f1_score: Optional[float] = None
+    roc_auc: Optional[float] = None
     tempo_treino_s: float = 0.0
+    status: Optional[str] = None
+    error: Optional[str] = None
+    model_bytes: Optional[bytes] = None
+    run_id: str = ""
 
     type: str = field(default=MSG_TASK_RESULT, init=False)
 
@@ -191,8 +216,10 @@ class ErrorMsg:
 def from_dict(data: Dict[str, Any]):
     """Builds a message object from dict data."""
     msg_type = data.get("type")
-    cls = _TYPE_MAP.get(msg_type)
+    if msg_type is None:
+        raise ValueError(f"Unknown message type: {msg_type!r}")
 
+    cls = _TYPE_MAP.get(msg_type)
     if cls is None:
         raise ValueError(f"Unknown message type: {msg_type!r}")
 
@@ -224,11 +251,31 @@ class MaekawaRelease:
 
 @dataclass
 class SyncState:
-    id_node: str # id do servidor
+    id_node: str  # id do servidor
     global_table_snapshot: dict
-    task_queue_snapshot: list
-    best_model_metrics: dict
+    run_id: str = ""
+    pupil_id: str = ""
+    pupil_epoch: int = 0
+    snapshot_id: str = ""
+    task_queue_snapshot: list = field(default_factory=list)
+    best_model_metrics: dict = field(default_factory=dict)
     type: str = field(default=MSG_SYNC_STATE, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class MembershipUpdate:
+    epoch: int
+    peers: list
+    run_id: str = ""
+    type: str = field(default=MSG_MEMBERSHIP_UPDATE, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class PeerReady:
+    id_node: str
+    type: str = field(default=MSG_PEER_READY, init=False)
     def to_dict(self): return asdict(self)
 
 
@@ -253,9 +300,61 @@ class BullyCoordinatorMsg:
     def to_dict(self): return asdict(self)
 
 
+@dataclass
+class DatasetReady:
+    id_node: str
+    fragment_id: str
+    run_id: str = ""
+    type: str = field(default=MSG_DATASET_READY, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class RequestFragment:
+    id_node: str
+    fragment_id: str
+    type: str = field(default=MSG_REQUEST_FRAGMENT, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class FragmentData:
+    id_node: str
+    fragment_id: str
+    data: bytes
+    type: str = field(default=MSG_FRAGMENT_DATA, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class FragmentNotFound:
+    id_node: str
+    fragment_id: str
+    type: str = field(default=MSG_FRAGMENT_NOT_FOUND, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class RequestFragmentBackup:
+    id_node: str
+    fragment_id: str
+    type: str = field(default=MSG_REQUEST_FRAGMENT_BACKUP, init=False)
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class FragmentBackupData:
+    id_node: str
+    fragment_id: str
+    data: bytes
+    type: str = field(default=MSG_FRAGMENT_BACKUP, init=False)
+    def to_dict(self): return asdict(self)
+
+
 # Mapeamento de tipo para as mensagens
 _TYPE_MAP = {
     MSG_JOIN_NETWORK: JoinNetwork,
+    MSG_JOIN_ACK: JoinAck,
     MSG_FIND_NODE: FindNode,
     MSG_KEEP_ALIVE: KeepAlive,
     MSG_TRAINING_TASK: TrainingTask,
@@ -265,6 +364,7 @@ _TYPE_MAP = {
     MSG_PUBSUB_SUBSCRIBE: PubSubSubscribe,
     MSG_PUBSUB_UNSUBSCRIBE: PubSubUnsubscribe,  # added
     MSG_PUBSUB_PUBLISH: PubSubPublish,
+    MSG_PUBSUB_NOTIFY: PubSubNotify,
     MSG_ACK: Ack,
     MSG_ERROR: ErrorMsg,
     MSG_MAEKAWA_REQUEST: MaekawaRequest,
@@ -274,6 +374,12 @@ _TYPE_MAP = {
     MSG_BULLY_ALIVE: BullyAliveMsg,
     MSG_BULLY_COORDINATOR: BullyCoordinatorMsg,
     MSG_SYNC_STATE: SyncState,
+    MSG_DATASET_READY: DatasetReady,
+    MSG_REQUEST_FRAGMENT: RequestFragment,
+    MSG_FRAGMENT_DATA: FragmentData,
+    MSG_FRAGMENT_NOT_FOUND: FragmentNotFound,
+    MSG_REQUEST_FRAGMENT_BACKUP: RequestFragmentBackup,
+    MSG_FRAGMENT_BACKUP: FragmentBackupData,
+    MSG_MEMBERSHIP_UPDATE: MembershipUpdate,
+    MSG_PEER_READY: PeerReady,
 }
-
-
