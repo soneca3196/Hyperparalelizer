@@ -1,8 +1,16 @@
 from sklearn.neural_network import MLPClassifier
 from sklearn.ensemble import RandomForestClassifier
-from xgboost import XGBClassifier
-from lightgbm import LGBMClassifier
 import numpy as np
+
+try:
+    from xgboost import XGBClassifier
+except ImportError:  # pragma: no cover - depends on optional dependency availability
+    XGBClassifier = None
+
+try:
+    from lightgbm import LGBMClassifier
+except ImportError:  # pragma: no cover - depends on optional dependency availability
+    LGBMClassifier = None
 
 """
 Classe base para todos os wrappers de modelos de classificação.
@@ -23,6 +31,9 @@ class BaseModel:
 
     def predict(self, X):
         """Retorna as classes preditas para as amostras em X."""
+        if self.model is None:
+            raise ValueError("O modelo ainda não foi treinado. Chame o método 'fit' antes de 'predict'.")
+        
         return self.model.predict(X)
 
     def predict_proba(self, X):
@@ -32,6 +43,9 @@ class BaseModel:
         Para classificação multiclasse, retorna a matriz completa de probabilidades.
         Retorna None se o modelo subjacente não suportar predict_proba.
         """
+        if self.model is None:
+            raise ValueError("O modelo ainda não foi treinado. Chame o método 'fit' antes de 'predict_proba'.")
+
         if not hasattr(self.model, "predict_proba"):
             return None
         proba = self.model.predict_proba(X)
@@ -66,6 +80,8 @@ class XGBWrapper(BaseModel):
 
     def __init__(self, params):
         super().__init__(params)
+        if XGBClassifier is None:
+            raise ImportError("xgboost não está instalado")
         self.model = XGBClassifier(**params, eval_metric="logloss", verbosity=0)
 
     def fit(self, X, y):
@@ -78,6 +94,8 @@ class LGBMWrapper(BaseModel):
 
     def __init__(self, params):
         super().__init__(params)
+        if LGBMClassifier is None:
+            raise ImportError("lightgbm não está instalado")
         self.model = LGBMClassifier(**params, verbosity=-1)
 
     def fit(self, X, y):

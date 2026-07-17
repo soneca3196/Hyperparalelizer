@@ -1,16 +1,14 @@
 """ ServerMessenger - Roteador TCP assíncrono.
  - Aceitar conexões TCP dos peers.
- - Ler e deserializar a mensagem recebida.
  - Identificar o tipo da mensagem e despachar para o handler registrado.
- - Fechar a conexão após o processamento.
  - Expor status_queue para publicação de eventos por handlers externos.
 Os handlers concretos de protocolo são registrados externamente via register_all_handlers() (server-peer_protocol.py), mantendo este módulo restrito ao transporte e roteamento.
 """
 import asyncio
 from typing import Any, Callable, Coroutine, Dict, Optional
 
-from core.network import recv_message
-from hyperparalelizer.server.middleware import Coordinator
+from core.network import DEFAULT_TIMEOUT, recv_message, send_message
+from hyperparalelizer.server.coordinator import Coordinator
 from utils.logger import get_logger
 
 log = get_logger("server_messenger")
@@ -56,18 +54,54 @@ class ServerMessenger:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
-        # Lê uma mensagem, despacha para o handler correto e fecha a conexão
+        """Processa uma conexão, lendo mensagens em loop até o peer fechar
+        """
         peer_addr = writer.get_extra_info("peername")
-        try:
-            msg = await recv_message(reader)
-            msg_type = msg.get("type", "")
-            log.debug(f"Recebido '{msg_type}' de {peer_addr}")
 
-            handler = self._handlers.get(msg_type)
-            if handler:
-                await handler(msg, writer)
-            else:
-                log.warning(f"Tipo de mensagem desconhecido: '{msg_type}' de {peer_addr}")
+        try:
+            while True:
+                try:
+                    msg = await asyncio.wait_for(
+                        recv_message(reader),
+                        timeout=DEFAULT_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    log.debug(f"Conexão de {peer_addr} ociosa, encerrando")
+                    break
+                except asyncio.IncompleteReadError:
+                    # peer fechou a conexão normalmente
+                    break
+
+                msg_type = msg.get("type", "")
+                log.debug(f"Recebido '{msg_type}' de {peer_addr}")
+
+                handler = self._handlers.get(msg_type)
+                if handler is None:
+                    log.warning(f"Tipo de mensagem desconhecido: '{msg_type}' de {peer_addr}")
+                    err = {
+                        "type": "Error",
+                        "code": "UNKNOWN_TYPE",
+                        "detail": msg_type,
+                    }
+                    try:
+                        await send_message(writer, err)
+                    except Exception:
+                        pass
+                    continue
+
+                try:
+                    await handler(msg, writer)
+                except Exception as exc:
+                    log.error(f"Handler de '{msg_type}' falhou para {peer_addr}: {exc}")
+                    err = {
+                        "type": "Error",
+                        "code": "HANDLER_ERROR",
+                        "detail": str(exc),
+                    }
+                    try:
+                        await send_message(writer, err)
+                    except Exception:
+                        pass
 
         except Exception as exc:
             log.error(f"Erro ao processar conexão de {peer_addr}: {exc}")
@@ -77,5 +111,3 @@ class ServerMessenger:
                 await writer.wait_closed()
             except Exception:
                 pass
-
-

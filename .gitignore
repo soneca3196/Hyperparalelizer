@@ -1,0 +1,10 @@
+__pycache__/**/*
+__pycache__/
+test_fragmentacao/
+settings.json
+test_coordinator.py
+.venv/
+.venv/**/*
+**/__init__.py
+data/
+data/**/*

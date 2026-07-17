@@ -281,7 +281,8 @@ class PubSubClient:
     def start_outbound_listener(self, loop: asyncio.AbstractEventLoop) -> None:
         """Inicia a thread que consome a outbound_queue e envia publishes
         """
-        if self._outbound_queue is None:
+        outbound_queue = self._outbound_queue
+        if outbound_queue is None:
             log.warning(
                 "PubSubClient: start_outbound_listener chamado "
                 "sem outbound_queue configurada"
@@ -293,20 +294,20 @@ class PubSubClient:
 
             while not self._stop_event.is_set():
                 try:
-                    item = self._outbound_queue.get(timeout=1.0)
+                    item = outbound_queue.get(timeout=1.0)
                 except queue.Empty:
                     continue
 
                 topic = item.get("topic", "")
                 payload = item.get("payload", {})
-                lamport = item.get("lamport", 0)
+                lamport = item.get("lamport_clock", item.get("lamport", 0))
 
                 if not topic:
                     log.warning(
                         "PubSubClient: item na outbound_queue "
                         "sem 'topic', ignorando"
                     )
-                    self._outbound_queue.task_done()
+                    outbound_queue.task_done()
                     continue
 
                 future = asyncio.run_coroutine_threadsafe(
@@ -327,7 +328,7 @@ class PubSubClient:
                         f"'{topic}' — {exc}"
                     )
                 finally:
-                    self._outbound_queue.task_done()
+                    outbound_queue.task_done()
 
             log.info("PubSubClient: outbound listener thread encerrada")
 

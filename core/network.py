@@ -49,49 +49,72 @@ async def send_once(
     *,
     expect_reply: bool = True,
     timeout: float = DEFAULT_TIMEOUT,
+    max_retries: int = 1,
+    retry_delay: float = 0.2,
 ) -> Optional[Dict[str, Any]]:
-    """Abre conexão, envia mensagem e fecha."""
-    try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(ip, port),
-            timeout=timeout,
-        )
+    """Abre conexão, envia mensagem e fecha, com retry simples para falhas transitórias."""
+    last_error: Optional[Exception] = None
 
-    except (OSError, asyncio.TimeoutError) as exc:
-        log.warning(f"send_once: failed to connect to {ip}:{port} — {exc}")
-        return None
-
-    try:
-        await send_message(writer, data)
-
-        if not expect_reply:
+    for attempt in range(max_retries + 1):
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(ip, port),
+                timeout=timeout,
+            )
+        except (OSError, asyncio.TimeoutError) as exc:
+            last_error = exc
+            if attempt < max_retries:
+                if retry_delay > 0:
+                    await asyncio.sleep(retry_delay)
+                continue
+            log.warning(f"send_once: failed to connect to {ip}:{port} — {exc}")
             return None
 
-        reply = await asyncio.wait_for(
-            recv_message(reader),
-            timeout=timeout,
-        )
-
-        return reply
-
-    except asyncio.TimeoutError:
-        log.warning(
-            f"send_once: timeout waiting for reply from {ip}:{port}"
-        )
-        return None
-
-    except Exception as exc:
-        log.error(
-            f"send_once: error communicating with {ip}:{port} — {exc}"
-        )
-        return None
-
-    finally:
         try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            pass
+            await send_message(writer, data)
+
+            if not expect_reply:
+                return None
+
+            reply = await asyncio.wait_for(
+                recv_message(reader),
+                timeout=timeout,
+            )
+
+            return reply
+
+        except asyncio.TimeoutError:
+            last_error = asyncio.TimeoutError()
+            if attempt < max_retries:
+                if retry_delay > 0:
+                    await asyncio.sleep(retry_delay)
+                continue
+            log.warning(
+                f"send_once: timeout waiting for reply from {ip}:{port}"
+            )
+            return None
+
+        except Exception as exc:
+            last_error = exc
+            if attempt < max_retries:
+                if retry_delay > 0:
+                    await asyncio.sleep(retry_delay)
+                continue
+            log.error(
+                f"send_once: error communicating with {ip}:{port} — {exc}"
+            )
+            return None
+
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    if last_error is not None:
+        log.warning(f"send_once: exhausted retries for {ip}:{port} — {last_error}")
+    return None
 
 
 # Conexão persistente
@@ -133,15 +156,20 @@ class PersistentConnection:
                 "Connection is not open. Call connect() first."
             )
 
-        await send_message(self._writer, data)
+        writer = self._writer
+        if writer is None:
+            raise RuntimeError("Connection is not open. Call connect() first.")
+
+        await send_message(writer, data)
 
     async def recv(self) -> Dict[str, Any]:
         """Recebe um frame."""
-        if not self.is_open:
+        reader = self._reader
+        if not self.is_open or reader is None:
             raise RuntimeError("Connection is not open.")
 
         return await asyncio.wait_for(
-            recv_message(self._reader),
+            recv_message(reader),
             timeout=self.timeout,
         )
 
@@ -233,48 +261,64 @@ class KeepAliveManager:
     async def stop(self) -> None:
         self._running = False
 
-    async def _probe_all(self) -> None:
-        """Envia heartbeats."""
+    async def _probe_one(self, peer_id: str, info: Dict[str, Any]) -> Optional[str]:
+        """Retorna peer_id se o peer deve ser considerado morto, ou None se não"""
         from utils.protocol import KeepAlive
 
+        msg = KeepAlive(
+            id_node=self.node_id,
+        ).to_dict()
+
+        reply = await send_once(
+            info["ip"],
+            info["port"],
+            msg,
+            expect_reply=True,
+            timeout=self.interval * 0.8,
+        )
+
+        async with self._lock:
+            if peer_id not in self._peers:
+                return None
+
+            if reply is not None:
+                self._peers[peer_id]["missed"] = 0
+                self._peers[peer_id]["last_seen"] = time.monotonic()
+                return None
+
+            self._peers[peer_id]["missed"] += 1
+            missed = self._peers[peer_id]["missed"]
+
+            log.warning(
+                f"KeepAlive: {peer_id[:8]}… did not respond "
+                f"({missed}/{self.missed_limit})"
+            )
+
+            if missed >= self.missed_limit:
+                return peer_id
+            return None
+
+    async def _probe_all(self) -> None:
+        """Envia heartbeats
+        """
         async with self._lock:
             peers_snapshot = dict(self._peers)
 
+        results = await asyncio.gather(
+            *(
+                self._probe_one(peer_id, info)
+                for peer_id, info in peers_snapshot.items()
+            ),
+            return_exceptions=True,
+        )
+
         dead = []
-
-        for peer_id, info in peers_snapshot.items():
-            msg = KeepAlive(
-                id_node=self.node_id,
-            ).to_dict()
-
-            reply = await send_once(
-                info["ip"],
-                info["port"],
-                msg,
-                expect_reply=True,
-                timeout=self.interval * 0.8,
-            )
-
-            async with self._lock:
-                if peer_id not in self._peers:
-                    continue
-
-                if reply is not None:
-                    self._peers[peer_id]["missed"] = 0
-                    self._peers[peer_id]["last_seen"] = time.monotonic()
-
-                else:
-                    self._peers[peer_id]["missed"] += 1
-
-                    missed = self._peers[peer_id]["missed"]
-
-                    log.warning(
-                        f"KeepAlive: {peer_id[:8]}… did not respond "
-                        f"({missed}/{self.missed_limit})"
-                    )
-
-                    if missed >= self.missed_limit:
-                        dead.append(peer_id)
+        for peer_id, result in zip(peers_snapshot.keys(), results):
+            if isinstance(result, Exception):
+                log.error(f"KeepAlive: erro ao sondar {peer_id[:8]}… — {result}")
+                continue
+            if result is not None:
+                dead.append(result)
 
         for peer_id in dead:
             async with self._lock:
@@ -388,6 +432,8 @@ class P2PNode:
         from utils.protocol import Ack, MSG_KEEP_ALIVE
 
         keepalive_ref = self.keepalive
+        if keepalive_ref is None:
+            raise RuntimeError("keepalive broke")
 
         async def _handle_keepalive(
             msg: Dict[str, Any],

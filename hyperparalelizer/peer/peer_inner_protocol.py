@@ -20,6 +20,7 @@ EVT_TRAINING_STARTED = "TrainingStarted"
 EVT_TRAINING_FINISHED = "TrainingFinished"
 EVT_TRAINING_FAILED = "TrainingFailed"
 EVT_BEST_MODEL_UPDATED = "BestModelUpdatedLocally"
+EVT_PUPIL_PROMOTED = "PupilPromoted"
 
 
 @dataclass
@@ -106,6 +107,18 @@ class BestModelUpdatedLocally:
         return asdict(self)
 
 
+@dataclass
+class PupilPromoted:
+    """Peer pupilo foi promovido para assumir o papel de coordenador."""
+    coordinator: Any
+    timestamp: float = field(default_factory=time.time)
+
+    type: str = field(default=EVT_PUPIL_PROMOTED, init=False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
 # Barramento interno (thread-safe)
 
 InternalEvent = Any
@@ -132,6 +145,9 @@ class InternalEventBus:
 
     def publish(self, event: InternalEvent) -> None:
         event_type = getattr(event, "type", None)
+        if event_type is None:
+            raise ValueError("event_type is None")
+        
         self._history.put(event)
 
         with self._lock:

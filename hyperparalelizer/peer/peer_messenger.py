@@ -7,7 +7,7 @@ import threading
 from typing import Any, Dict, Optional
 
 from utils.logger import get_logger
-from utils.protocol import MSG_TRAINING_TASK, MSG_REQUEST_BEST, Ack
+from utils.protocol import MSG_TRAINING_TASK, MSG_REQUEST_BEST, Ack, ErrorMsg
 from core.network import P2PNode, send_once, send_message
 
 log = get_logger("peer_messenger")
@@ -21,23 +21,46 @@ class PeerMessenger:
         node_id: str,
         server_ip: str,
         server_port: int,
-        loop: asyncio.AbstractEventLoop,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
         self.node_id = node_id
         self.server_ip = server_ip
         self.server_port = server_port
         self.loop = loop
+        self._owns_loop = False
+        self._ensure_loop()
 
         self.trainer = None  # setado via attach_trainer()
 
         self._outbound_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._outbound_thread: Optional[threading.Thread] = None
+        self._loop_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
     # Ligação com outros componentes
 
     def attach_trainer(self, trainer) -> None:
         self.trainer = trainer
+
+    def _ensure_loop(self) -> None:
+        if self.loop is not None:
+            self._owns_loop = False
+            return
+
+        try:
+            self.loop = asyncio.get_running_loop()
+            self._owns_loop = False
+            return
+        except RuntimeError:
+            pass
+
+        try:
+            self.loop = asyncio.get_event_loop_policy().get_event_loop()
+            self._owns_loop = False
+        except RuntimeError:
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            self._owns_loop = True
 
     def register_handlers(self, p2p_node: P2PNode) -> None:
         """Registra mensagens vindas do servidor"""
@@ -48,15 +71,38 @@ class PeerMessenger:
     async def _handle_training_task(
         self, msg: Dict[str, Any], writer: asyncio.StreamWriter
     ) -> None:
-        # confirma recebimento sem esperar o treino terminar
-        ack = Ack(ref_type=MSG_TRAINING_TASK, ref_id=msg.get("task_id", "")).to_dict()
-        await send_message(writer, ack)
+        task_id = str(msg.get("task_id") or "")
 
         if self.trainer is None:
             log.error("PeerMessenger: TrainingTask recebida sem trainer")
+            await send_message(
+                writer, ErrorMsg(code="NO_TRAINER", detail=task_id).to_dict()
+            )
             return
 
-        asyncio.create_task(self.trainer.handle_training_task(msg))
+        task_run_id = str(msg.get("run_id") or "")
+        trainer_run_id = str(getattr(self.trainer, "run_id", "") or "")
+        if trainer_run_id and task_run_id and task_run_id != trainer_run_id:
+            log.warning(
+                f"PeerMessenger: task '{task_id}' rejeitada (run_id divergente)"
+            )
+            await send_message(
+                writer, ErrorMsg(code="RUN_MISMATCH", detail=task_id).to_dict()
+            )
+            return
+
+        accepted = await self.trainer.try_submit_task(msg)
+        if not accepted:
+            log.warning(
+                f"PeerMessenger: task '{task_id}' rejeitada (peer ocupado ou duplicada)"
+            )
+            await send_message(
+                writer, ErrorMsg(code="PEER_BUSY", detail=task_id).to_dict()
+            )
+            return
+
+        ack = Ack(ref_type=MSG_TRAINING_TASK, ref_id=task_id).to_dict()
+        await send_message(writer, ack)
 
     async def _handle_request_best_model(
         self, msg: Dict[str, Any], writer: asyncio.StreamWriter
@@ -75,6 +121,18 @@ class PeerMessenger:
 
     def start(self) -> None:
         """Inicia a thread que consome a fila"""
+        self._ensure_loop()
+        if self.loop is None:
+            raise RuntimeError("PeerMessenger requires an event loop")
+
+        if not self.loop.is_running():
+            self._loop_thread = threading.Thread(
+                target=self.loop.run_forever,
+                name="peer-messenger-loop",
+                daemon=True,
+            )
+            self._loop_thread.start()
+
         self._stop_event.clear()
         self._outbound_thread = threading.Thread(
             target=self._outbound_worker,
@@ -87,6 +145,16 @@ class PeerMessenger:
         self._stop_event.set()
         if self._outbound_thread and self._outbound_thread.is_alive():
             self._outbound_thread.join(timeout=5.0)
+
+        if self._loop_thread and self._loop_thread.is_alive():
+            if self.loop is not None and not self.loop.is_closed():
+                self.loop.call_soon_threadsafe(self.loop.stop)
+            self._loop_thread.join(timeout=5.0)
+
+        if self._owns_loop and self.loop is not None and not self.loop.is_closed():
+            self.loop.close()
+
+        self.loop = None
 
     def _outbound_worker(self) -> None:
         log.info("PeerMessenger: outbound worker iniciado")
