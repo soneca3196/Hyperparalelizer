@@ -16,7 +16,7 @@ MSG_TASK_RESULT = "TaskResult"
 MSG_REQUEST_BEST = "RequestBestModel"
 MSG_SEND_BEST = "SendBestModel"
 MSG_PUBSUB_SUBSCRIBE = "PubSubSubscribe"
-MSG_PUBSUB_UNSUBSCRIBE = "PubSubUnsubscribe"  # added
+MSG_PUBSUB_UNSUBSCRIBE = "PubSubUnsubscribe"
 MSG_PUBSUB_PUBLISH = "PubSubPublish"
 MSG_PUBSUB_NOTIFY = "PubSubNotify"
 MSG_ACK = "Ack"
@@ -156,7 +156,7 @@ class PubSubSubscribe:
 
 
 @dataclass
-class PubSubUnsubscribe:  # added
+class PubSubUnsubscribe:
     id_node: str
     topic: str
 
@@ -362,7 +362,7 @@ _TYPE_MAP = {
     MSG_REQUEST_BEST: RequestBestModel,
     MSG_SEND_BEST: SendBestModel,
     MSG_PUBSUB_SUBSCRIBE: PubSubSubscribe,
-    MSG_PUBSUB_UNSUBSCRIBE: PubSubUnsubscribe,  # added
+    MSG_PUBSUB_UNSUBSCRIBE: PubSubUnsubscribe,
     MSG_PUBSUB_PUBLISH: PubSubPublish,
     MSG_PUBSUB_NOTIFY: PubSubNotify,
     MSG_ACK: Ack,

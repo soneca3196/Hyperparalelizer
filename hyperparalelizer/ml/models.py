@@ -103,7 +103,7 @@ class LGBMWrapper(BaseModel):
         self.n_classes_ = len(np.unique(y))
 
 
-# 🔹 Factory
+# Factory
 def get_model(model_name: str, params: dict) -> BaseModel:
     """Cria e retorna uma instância do wrapper correspondente ao nome do modelo.
     

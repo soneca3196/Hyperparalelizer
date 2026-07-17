@@ -269,12 +269,7 @@ class TrainerNode:
             run_id=self.run_id,
         )
 
-        # A GlobalTable restaurada carrega o pupil_id/pupil_epoch de antes da
-        # queda (preservados em get_snapshot/overwrite_from_snapshot), mas o
-        # PupilManager novo nasce zerado (epoch=0, pupil_id=None). Sem esta
-        # sincronização, o primeiro reconcile() do novo coordenador reatribuiria
-        # epoch=1 a partir do zero, e peers que já viram uma epoch maior
-        # rejeitariam o SyncState como STALE_SYNC_STATE indefinidamente.
+        # Restaura pupil_id/epoch do snapshot no novo pupil_manager
         novo_coordenador.pupil_manager._pupil_id = tabela_recuperada.pupil_id
         novo_coordenador.pupil_manager._epoch = tabela_recuperada.pupil_epoch
         if tabela_recuperada.pupil_id:

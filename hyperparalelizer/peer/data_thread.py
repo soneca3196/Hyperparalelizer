@@ -65,13 +65,6 @@ class DataThread:
             self.server_ip, self.server_port, msg, expect_reply=True, timeout=timeout
         )
 
-#        if reply is None or reply.get("type") != MSG_JOIN_ACK:
-#            log.error("DataThread: falha ao entrar na rede")
-#            return None
-#        self.fragment_id = reply.get("fragment_id")
-#        self.known_peers = reply.get("peers", []) or []
-#        self.initial_task = reply.get("task")
-
         if reply is None:
             log.error("DataThread: servidor não respondeu ao JoinNetwork")
             return None

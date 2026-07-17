@@ -63,7 +63,6 @@ class PupilManager:
                 table.pupil_id = candidate_id
                 table.pupil_epoch = self._epoch
  
-            # Compatibilidade com código legado que ainda lê pupil_peer.
             self.coordinator.pupil_peer = candidate
  
             if previous_node is not None:
