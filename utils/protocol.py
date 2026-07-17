@@ -55,9 +55,8 @@ class JoinAck:
     node_id: str
     fragment_id: Optional[str]
     peers: List[Dict[str, Any]]
-    task: Optional[Dict[str, Any]] = None
     run_id: str
-
+    task: Optional[Dict[str, Any]] = None
     type: str = field(default=MSG_JOIN_ACK, init=False)
 
     def to_dict(self) -> Dict[str, Any]:

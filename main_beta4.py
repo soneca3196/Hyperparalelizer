@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-"""main_beta4.py - bootstrap e orquestração do Hyperparalelizer.
+"""hyperparalelizer.main - bootstrap e orquestração do Hyperparalelizer.
 
-Esta main integra apenas contratos confirmados nos módulos atuais. Ela evita
-reimplementar fragmentação, treinamento, avaliação, coordenação e protocolos.
-As pequenas classes auxiliares deste arquivo adicionam validação de bootstrap,
-retry persistente e observabilidade que ainda não existem nos componentes.
+Integra servidor coordenador, peers de treinamento, fragmentação de dataset,
+Maekawa, Bully, Peer Pupilo e Pub/Sub conforme a especificação do Grupo 12.
 
 Uso:
-    python main_beta4.py server --host 127.0.0.1 --port 9000 --fragments 10
-    python main_beta4.py peer --host 127.0.0.1 --port 9101 --server-host 127.0.0.1 --server-port 9000 --reset-storage
-
-    (mudar só o port para ter outros peers)
+    python -m main_beta4 server --host 127.0.0.1 --port 9000 --fragments 10 --stop-when-complete
+    python -m main_beta4 peer --host 127.0.0.1 --port 9101 --server-host 127.0.0.1 --server-port 9000 --reset-storage
+    python -m main_beta4 peer --host 127.0.0.1 --port 9102 --server-host 127.0.0.1 --server-port 9000 --reset-storage
 """
 
 import argparse
@@ -137,6 +134,14 @@ class ServerProgress:
         value = self.retry_counts.get(task_id, 0) + 1
         self.retry_counts[task_id] = value
         return value
+
+    def register_failure_or_retry(self, task_id: str, max_retries: int) -> tuple[bool, int]:
+        retries = self.register_retry(task_id)
+        if retries > max_retries:
+            if task_id:
+                self.failed_task_ids.add(task_id)
+            return False, retries
+        return True, retries
 
     @property
     def completed(self) -> int:
@@ -693,12 +698,15 @@ async def wait_for_listener(host: str, port: int, timeout: float = 10.0) -> None
     last_error: Optional[BaseException] = None
     while time.monotonic() < deadline:
         try:
-            reader, writer = await asyncio.open_connection(connect_host, port)
-            del reader
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(connect_host, port),
+                timeout=min(1.0, max(0.05, deadline - time.monotonic())),
+            )
             writer.close()
-            await writer.wait_closed()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
             return
-        except (ConnectionRefusedError, OSError) as exc:
+        except (ConnectionRefusedError, OSError, asyncio.TimeoutError) as exc:
             last_error = exc
             await asyncio.sleep(0.05)
     raise BootstrapError(
@@ -804,21 +812,19 @@ async def status_consumer(runtime: ServerRuntime) -> None:
                 if event.get("status") == "success":
                     runtime.progress.register_success(task_id)
                 else:
-
-                    accepted_retry = runtime.progress.register_failure_or_retry(task_id, runtime.args.max_task_retries)
-                    
+                    accepted_retry, retry = runtime.progress.register_failure_or_retry(
+                        task_id, runtime.args.max_task_retries
+                    )
                     if accepted_retry:
-
                         print(
                             f"[RETRY] Tarefa {short_id(task_id)} reenfileirada "
-                            f"(tentativa registrada: {accepted_retry})"
+                            f"(tentativa registrada: {retry})"
                         )
-
                     else:
                         print(
-                        f"[PROGRESSO] Tarefa {short_id(task_id)} falhou "
-                        f"definitivamente após {runtime.args.max_task_retries} tentativas."
-                            )
+                            f"[PROGRESSO] Tarefa {short_id(task_id)} falhou "
+                            f"definitivamente após {runtime.args.max_task_retries} tentativas."
+                        )
                         
                 print_progress(runtime)
 
@@ -909,7 +915,7 @@ async def pupil_sync_service(runtime: ServerRuntime, interval: float = 2.0) -> N
 
         nodes = [
             node
-            for node in runtime.global_table.get_all_nodes()
+            for node in runtime.coordinator.GlobalTable.get_all_nodes()
             if node.get("ready") is True
         ]
 
@@ -1416,6 +1422,7 @@ async def run_peer(args: argparse.Namespace) -> None:
         dataset_loader=dataset_loader,
         maekawa_mutex=mutex,
         event_bus=event_bus,
+        run_id=join.run_id,
     )
     messenger.attach_trainer(trainer)
 
@@ -1659,6 +1666,12 @@ def build_parser() -> argparse.ArgumentParser:
     server.add_argument("--peer-wait-timeout", type=positive_float, default=30.0)
     server.add_argument("--disable-pubsub", action="store_true")
     server.add_argument("--disable-pupil", action="store_true")
+    server.add_argument(
+        "--max-task-retries",
+        type=positive_int,
+        default=3,
+        help="Limite de tentativas por tarefa",
+    )
 
     peer = subparsers.add_parser("peer", help="Inicia um nó de treinamento")
     peer.add_argument("--host", default="127.0.0.1")
@@ -1679,14 +1692,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def async_main() -> None:
-    args = parser.parse_args()
     parser = build_parser()
-    parser.add_argument("--max-task-retries", type=int, default=3, help="Limite de tentativas por tarefa")
+
+    parser.add_argument(
+        "--max-task-retries",
+        type=int,
+        default=3,
+        help="Limite de tentativas por tarefa",
+    )
+
+    args = parser.parse_args()
+
     if args.mode == "server":
         await run_server(args)
     elif args.mode == "peer":
         await run_peer(args)
-    else:  # pragma: no cover - argparse impede este estado
+    else:
         parser.error(f"Modo desconhecido: {args.mode}")
 
 
