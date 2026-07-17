@@ -80,6 +80,17 @@ class PeerMessenger:
             )
             return
 
+        task_run_id = str(msg.get("run_id") or "")
+        trainer_run_id = str(getattr(self.trainer, "run_id", "") or "")
+        if trainer_run_id and task_run_id and task_run_id != trainer_run_id:
+            log.warning(
+                f"PeerMessenger: task '{task_id}' rejeitada (run_id divergente)"
+            )
+            await send_message(
+                writer, ErrorMsg(code="RUN_MISMATCH", detail=task_id).to_dict()
+            )
+            return
+
         accepted = await self.trainer.try_submit_task(msg)
         if not accepted:
             log.warning(

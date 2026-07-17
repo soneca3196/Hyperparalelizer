@@ -807,7 +807,7 @@ Não é correto resolver isso com mais `sleep()`.
 
 ---
 
-# 11. O modo `--min-peers` contém um problema no estado do progresso
+# 11. O modo `--min-peers` contém um problema no estado do progresso [FIXED]
 
 Quando:
 
@@ -924,7 +924,7 @@ O `Coordinator` também não deve reenfileirar uma tarefa marcada como falha def
 
 ---
 
-# 13. A tarefa inicial não usa o mesmo caminho das tarefas normais
+# 13. A tarefa inicial não usa o mesmo caminho das tarefas normais [FIXED]
 
 A tarefa inicial é executada assim:
 
@@ -1539,6 +1539,457 @@ Mas somente depois de o runtime oficial receber:
 * papel formal de Pupilo.
 
 ---
+
+Foi cortado na interface. A continuação da lista, a partir da **tarefa 26**, é esta:
+
+## Bloco 4 — Execução, persistência e identificação da rodada
+
+### 26. Transmitir o `run_id` no `JoinAck`
+
+Atualmente, o servidor cria:
+
+```python
+run_id = uuid.uuid4().hex
+```
+
+Mas esse identificador não chega aos peers. Adicione `run_id` ao `JoinAck` para que todos os componentes saibam a qual execução pertencem.
+
+---
+
+### 27. Incluir `run_id` em todas as mensagens importantes
+
+Adicionar o campo em:
+
+* `TrainingTask`;
+* `TaskResult`;
+* `DatasetReady`;
+* `SyncState`;
+* `MembershipUpdate`;
+* mensagens de promoção;
+* metadados de fragmentos.
+
+Todo handler deve rejeitar mensagens de outra execução:
+
+```python
+if msg.get("run_id") != self.run_id:
+    await send_error(
+        writer,
+        code="RUN_ID_MISMATCH",
+    )
+    return
+```
+
+---
+
+### 28. Separar o spool de resultados por `run_id`
+
+Hoje a beta4 usa:
+
+```python
+spool_dir = storage_dir.parent / "pending_results"
+```
+
+O correto seria:
+
+```python
+spool_dir = (
+    storage_dir.parent
+    / "pending_results"
+    / join.run_id
+)
+```
+
+Isso evita que resultados de uma execução anterior sejam reenviados para o servidor atual.
+
+---
+
+### 29. Limpar `pending_results` com `--reset-storage`
+
+Atualmente, `--reset-storage` apaga apenas `fragments/`. O diretório de resultados pendentes permanece.
+
+Adicionar:
+
+```python
+if args.reset_storage:
+    pending_root = storage_dir.parent / "pending_results"
+
+    if pending_root.exists():
+        shutil.rmtree(pending_root)
+
+    pending_root.mkdir(parents=True, exist_ok=True)
+```
+
+Mesmo com essa limpeza, o ideal continua sendo separar os arquivos por `run_id`.
+
+---
+
+### 30. Criar um manifesto de armazenamento
+
+Criar algo como:
+
+```text
+data/peer_9101/manifest.json
+```
+
+Conteúdo:
+
+```json
+{
+  "run_id": "execucao-atual",
+  "dataset_id": "hash-do-dataset",
+  "fragment_count": 10
+}
+```
+
+No bootstrap do peer:
+
+```python
+if manifest.run_id != join.run_id:
+    limpar_fragmentos_antigos()
+```
+
+Assim, o peer não depende apenas da flag manual `--reset-storage`.
+
+---
+
+### 31. Rejeitar dados pertencentes a outra execução
+
+A validação deve ocorrer em:
+
+```text
+PeerMessenger
+DataThread
+TrainerNode
+Coordinator
+PupilManager
+handlers de SyncState
+handlers de DatasetReady
+handlers de TaskResult
+```
+
+Um resultado de treinamento antigo não pode ser aceito só porque o `task_id` existe ou possui formato válido.
+
+---
+
+### 32. Definir limite máximo de retries por tarefa
+
+Adicionar na CLI do servidor:
+
+```python
+server.add_argument(
+    "--max-task-retries",
+    type=positive_int,
+    default=3,
+)
+```
+
+A tabela precisa guardar o número de tentativas:
+
+```python
+task_attempts: Dict[str, int]
+```
+
+Ao falhar:
+
+```python
+attempts = global_table.increment_task_attempt(task_id)
+
+if attempts <= max_task_retries:
+    global_table.requeue_task(task)
+else:
+    global_table.mark_task_failed(task_id)
+```
+
+---
+
+### 33. Registrar falhas definitivas em `failed_task_ids`
+
+A beta4 possui:
+
+```python
+failed_task_ids: Set[str]
+```
+
+Mas não adiciona tarefas a esse conjunto.
+
+Implementar:
+
+```python
+def register_permanent_failure(self, task_id: str) -> None:
+    if task_id:
+        self.failed_task_ids.add(task_id)
+```
+
+A conclusão formal poderá então funcionar:
+
+```python
+completed + failed == total_tasks
+```
+
+Sem isso, o servidor pode permanecer esperando indefinidamente uma tarefa que sempre falha.
+
+---
+
+## Bloco 5 — Retirar correções estruturais da main
+
+### 34. Mover `SafeMaekawaMutex` para o `MaekawaMutex` oficial
+
+A correção para quórum vazio já está na beta4, mas foi colocada na main:
+
+```python
+class SafeMaekawaMutex(MaekawaMutex):
+```
+
+Mover esse comportamento para:
+
+```text
+hyperparalelizer/sync/maekawa.py
+```
+
+Depois usar diretamente:
+
+```python
+mutex = MaekawaMutex(
+    node_id=join.node_id,
+    quorum=join.peers,
+)
+```
+
+E remover `SafeMaekawaMutex` da main.
+
+---
+
+### 35. Mover `GuardedTrainerNode` para o `TrainerNode` oficial
+
+A main não deve precisar criar uma subclasse para capturar:
+
+```python
+MaekawaTimeoutError
+Exception
+```
+
+Esse tratamento deve existir dentro de:
+
+```text
+hyperparalelizer/peer/trainer.py
+```
+
+O `TrainerNode` deve garantir:
+
+* exatamente um resultado por tentativa;
+* liberação do mutex em `finally`;
+* evento de falha;
+* limpeza de `current_task`;
+* captura de erros de montagem, treino e sincronização.
+
+Depois remover:
+
+```python
+class GuardedTrainerNode(TrainerNode):
+```
+
+---
+
+### 36. Mover `install_dispatch_guard()` para `GlobalTable` e `Coordinator`
+
+A beta4 faz monkey patch:
+
+```python
+coordinator.dispatch_next_task = guarded_dispatch
+```
+
+Essa proteção deve virar parte oficial do fluxo.
+
+Na `GlobalTable`, criar uma reserva atômica:
+
+```python
+def reserve_next_task_for_peer(
+    self,
+    peer: Peer,
+) -> TrainingTask | None:
+    with self.lock:
+        if self.peer_has_assigned_task(peer.id_node):
+            return None
+
+        if not self.task_pool:
+            return None
+
+        task = self.task_pool.pop(0)
+        self.assigned_tasks[task.task_id] = {
+            "peer": peer,
+            "task": task,
+            "timestamp": time.monotonic(),
+        }
+        return task
+```
+
+Depois remover da main:
+
+```python
+install_dispatch_guard(coordinator)
+```
+
+---
+
+### 37. Mover o heartbeat para o estado oficial dos peers
+
+Hoje a main mantém:
+
+```python
+ServerHeartbeatTracker
+```
+
+separado da `GlobalTable`.
+
+Isso cria duas fontes de verdade:
+
+```text
+GlobalTable → sabe quais peers existem
+HeartbeatTracker → sabe quais peers estão vivos
+```
+
+Guardar na própria tabela:
+
+```python
+{
+    "node_id": node_id,
+    "status": "READY",
+    "last_seen": time.monotonic(),
+    "heartbeat_misses": 0,
+}
+```
+
+O monitor consulta e atualiza a tabela oficial.
+
+Depois remover gradualmente:
+
+```python
+ServerHeartbeatTracker
+PeerHealth
+```
+
+da main.
+
+---
+
+### 38. Mover a gestão do Pupilo para `PupilManager`
+
+Retirar da main:
+
+```python
+select_pupil()
+```
+
+e qualquer atribuição direta:
+
+```python
+runtime.coordinator.pupil_peer = pupil
+```
+
+O `PupilManager` deve ser o único componente autorizado a:
+
+* selecionar Pupilo;
+* incrementar `pupil_epoch`;
+* destituir o anterior;
+* atribuir o novo;
+* disparar sincronização;
+* invalidar réplicas antigas;
+* reagir à morte de peer.
+
+A main apenas inicia o serviço:
+
+```python
+runtime.pupil_manager = PupilManager(coordinator)
+```
+
+---
+
+### 39. Mover o spool confiável para o `PeerMessenger` oficial
+
+A beta4 implementa:
+
+```python
+class ReliablePeerMessenger(PeerMessenger):
+```
+
+Essa confiabilidade é responsabilidade do mensageiro do projeto, não da main.
+
+Mover para:
+
+```text
+hyperparalelizer/peer/peer_messenger.py
+```
+
+O mensageiro oficial deve oferecer:
+
+```python
+await messenger.start()
+await messenger.stop()
+messenger.restore_pending_results()
+messenger.send_task_result(...)
+```
+
+Também deve:
+
+* persistir por `run_id`;
+* distinguir erros permanentes de temporários;
+* não bloquear toda a fila por uma única mensagem;
+* remover o spool apenas após ACK válido;
+* impedir duplicação do mesmo `task_id`.
+
+---
+
+### 40. Deixar a `main_beta4.py` apenas como composição dos runtimes
+
+Depois das correções anteriores, a main deve deixar de implementar:
+
+```text
+SafeMaekawaMutex
+GuardedTrainerNode
+ReliablePeerMessenger
+ServerHeartbeatTracker
+install_dispatch_guard
+select_pupil
+lógica manual de membership
+lógica manual de promoção
+```
+
+O formato esperado seria próximo de:
+
+```python
+async def run_server(args):
+    runtime = ServerRuntime.from_config(
+        ServerConfig(
+            host=args.host,
+            port=args.port,
+            fragments=args.fragments,
+            min_peers=args.min_peers,
+            task_timeout=args.task_timeout,
+        )
+    )
+    await runtime.run()
+```
+
+E:
+
+```python
+async def run_peer(args):
+    runtime = PeerRuntime.from_config(
+        PeerConfig(
+            host=args.host,
+            port=args.port,
+            server_host=args.server_host,
+            server_port=args.server_port,
+            storage_dir=resolve_storage_dir(args),
+            reset_storage=args.reset_storage,
+        )
+    )
+    await runtime.run()
+```
+
+A main enviada atualmente está assumindo responsabilidades de muitos módulos do projeto, especialmente mensageria, Maekawa, heartbeat, dispatch e tolerância a falhas. 
+
+----
 
 # Ordem exata de correção
 

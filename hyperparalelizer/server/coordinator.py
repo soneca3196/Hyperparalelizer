@@ -43,12 +43,22 @@ class Coordinator:
                  model_type: str = "generic",
                  model_config: Optional[Dict[str, Any]] = None,
                  pubsub_queue: Optional[queue.Queue] = None,
-                 task_timeout: float = TASK_TIMEOUT):
+                 task_timeout: float = TASK_TIMEOUT,
+                 run_id: str = "", max_task_retries: int = 3,):
+        
+        if not run_id:
+            raise ValueError("Coordinator exige run_id válido")
+
+        self.run_id = run_id
+        self.max_task_retries = int(max_task_retries)
+        
         # Configurações estáticas/inputs (não mudam ao longo do ciclo de vida)
         self.dataset = dataset
         self.model = model
         self.model_type = model_type
         self.model_config = model_config or {}
+
+        self.run_id = run_id or ""
 
         # Dependências externas
         self.GlobalTable = global_table
@@ -132,6 +142,7 @@ class Coordinator:
                 "type": "MembershipUpdate",
                 "epoch": membership_epoch,
                 "peers": peers_for_node,
+                "run_id": self.run_id,
             }
             sends.append(send_once(node["ip"], node["port"], msg, expect_reply=False, timeout=5.0))
         if sends:
@@ -165,6 +176,7 @@ class Coordinator:
                     parametros=combo,
                     model_type=self.model_type,
                     model_config=dict(self.model_config),
+                    run_id=self.run_id,
                 )
                 for combo in combinations
             ]
@@ -269,6 +281,7 @@ class Coordinator:
         devolvida ao início de task_pool para ser reatribuída.
         Retorna True se a tarefa foi aceita pelo peer.
         """
+
         task = self.GlobalTable.reserve_next_task_for_peer(peer)
         if task is None:
             return False  # fila vazia ou peer já ocupado
@@ -310,7 +323,7 @@ class Coordinator:
         with self.GlobalTable.lock:
             busy_ids = {entry["peer"].id_node for entry in self.GlobalTable.assigned_tasks.values()}
             all_nodes = list(self.GlobalTable.nodes.values())
-
+            
         idle_peers = [
             node["metadata"]
             for node in all_nodes
@@ -493,6 +506,7 @@ class Coordinator:
             "type": MSG_SYNC_STATE,
             "id_node": "server",
             "snapshot_id": snapshot_id,
+            "run_id": self.run_id,
             "pupil_id": pupil_id,
             "pupil_epoch": self.GlobalTable.pupil_epoch,
             "global_table_snapshot": self.GlobalTable.get_snapshot(),
@@ -505,3 +519,14 @@ class Coordinator:
             and reply.get("ref_type") == MSG_SYNC_STATE
             and str(reply.get("ref_id") or "") == snapshot_id
         )
+
+
+    def register_failure_or_retry(self, task_id: str, max_retries: int) -> bool:
+        """Registra a tentativa e verifica se passou do limite."""
+        retries = self.register_retry(task_id)
+
+        if retries > max_retries:
+            self.failed_task_ids.add(task_id)
+            return False
+
+        return True

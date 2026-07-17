@@ -86,8 +86,13 @@ async def handle_join_network(msg: Dict[str, Any], writer: asyncio.StreamWriter,
             }
         )
 
-    response = JoinAck(node_id=node_id, fragment_id=fragment_id, peers=known_peers, task=task.to_dict() 
-                       if task else None,)
+    response = JoinAck(
+        node_id=node_id,
+        fragment_id=fragment_id,
+        peers=known_peers,
+        task=task.to_dict() if task else None,
+        run_id=coordinator.run_id,
+    )
 
     await send_message(writer, response.to_dict(),)
 
@@ -127,6 +132,20 @@ async def handle_task_result(
 ) -> None:
     # Roteado por: ServerMessenger → MSG_TASK_RESULT
     task_id = msg.get("task_id", "")
+    msg_run_id = msg.get("run_id") or ""
+
+    if msg_run_id and coordinator.run_id and msg_run_id != coordinator.run_id:
+        log.warning(
+            f"TaskResult: run_id divergente para task {task_id[:8]}… "
+            f"(msg={msg_run_id[:8]}…, servidor={coordinator.run_id[:8]}…) — rejeitado"
+        )
+        await send_message(writer, {
+            "type": "Error",
+            "code": "RUN_MISMATCH",
+            "detail": task_id,
+        })
+        return
+
     result = coordinator.receive_task_result(task_id, msg)
 
     ack = Ack(ref_type=MSG_TASK_RESULT, ref_id=task_id)
@@ -225,6 +244,7 @@ async def handle_dataset_ready(
     """
     node_id = msg.get("id_node", "")
     fragment_id = msg.get("fragment_id", "")
+    msg_run_id = msg.get("run_id") or ""
 
     if not node_id or not fragment_id:
         await send_message(writer, {
@@ -233,6 +253,12 @@ async def handle_dataset_ready(
             "detail": "id_node e fragment_id são obrigatórios.",
         })
         return
+
+    if msg_run_id and coordinator.run_id and msg_run_id != coordinator.run_id:
+        log.warning(
+            f"DatasetReady: run_id divergente de {node_id[:8]}… "
+            f"(msg={msg_run_id[:8]}…, servidor={coordinator.run_id[:8]}…)"
+        )
 
     coordinator.GlobalTable.add_fragment_location(fragment_id, node_id)
 

@@ -26,7 +26,7 @@ log = get_logger("trainer")
 
 
 class TrainerNode:
-    def __init__(self, node_id, messenger, data_thread, dataset_loader, maekawa_mutex, event_bus: Optional[InternalEventBus] = None):
+    def __init__(self, node_id, messenger, data_thread, dataset_loader, maekawa_mutex, event_bus: Optional[InternalEventBus] = None, run_id: str = ""):
         """
         event_bus: opcional, publica o ciclo de vida do treino (TrainingStarted, TrainingFinished, TrainingFailed)
         """
@@ -37,12 +37,13 @@ class TrainerNode:
         self.maekawa_mutex = maekawa_mutex
         self.event_bus = event_bus
 
+        self.run_id = run_id or ""
+
         self.best_model = None
         self.best_score = -1.0
         self.busy = False
 
         self.replica_global_table_snapshot: dict = {}
-
 
         self.is_pupil = False
         self.pupil_epoch = 0
@@ -56,6 +57,13 @@ class TrainerNode:
         sido processada. Retorna False para PEER_BUSY / duplicata."""
         task_id = str(task.get("task_id") or "")
         if not task_id:
+            return False
+        task_run_id = task.get("run_id") or ""
+        if self.run_id and task_run_id and task_run_id != self.run_id:
+            log.warning(
+                f"[Trainer {self.node_id[:8]}...] TrainingTask '{task_id}' "
+                f"rejeitada: run_id divergente ({task_run_id} != {self.run_id})"
+            )
             return False
         if task_id in self._processed_task_ids:
             return False
@@ -207,6 +215,7 @@ class TrainerNode:
         message = {
             "type": "TaskResult",
             "task_id": task.get("task_id"),
+            "run_id": task.get("run_id") or self.run_id,
             "status": "success" if error is None else "failed",
             "id_node": self.node_id,
             "accuracy": metrics["accuracy"] if metrics else None,
@@ -257,6 +266,7 @@ class TrainerNode:
             model=None,
             global_table=tabela_recuperada,
             model_type="generic",
+            run_id=self.run_id,
         )
 
         if self.event_bus is not None:

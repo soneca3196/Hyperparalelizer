@@ -115,6 +115,7 @@ class ValidatedJoin:
     node_id: str
     fragment_id: str
     peers: List[Dict[str, Any]]
+    run_id: str
     initial_task: Optional[Dict[str, Any]]
 
 
@@ -191,12 +192,6 @@ class NoOpMutex:
     async def release_access(self) -> None:
         self.state = "RELEASED"
 
-
-MAEKAWA_NOTE = (
-    "Fix #4: a otimização de quórum vazio/trivial e replace_quorum() dinâmico "
-    "agora vivem em hyperparalelizer.sync.maekawa.MaekawaMutex; a main usa a "
-    "classe diretamente, sem subclasses."
-)
 
 
 class ValidatingDatasetLoader(DatasetLoader):
@@ -575,6 +570,9 @@ def validate_join_reply(reply: Any) -> ValidatedJoin:
         raise BootstrapError(
             f"Resposta inesperada ao JoinNetwork: {reply.get('type')!r}"
         )
+    run_id = reply.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        raise BootstrapError("JoinAck sem run_id válido")
 
     node_id = reply.get("node_id")
     fragment_id = reply.get("fragment_id")
@@ -595,6 +593,7 @@ def validate_join_reply(reply: Any) -> ValidatedJoin:
         node_id=node_id,
         fragment_id=fragment_id,
         peers=normalized,
+        run_id=run_id,
         initial_task=initial_task,
     )
 
@@ -805,11 +804,22 @@ async def status_consumer(runtime: ServerRuntime) -> None:
                 if event.get("status") == "success":
                     runtime.progress.register_success(task_id)
                 else:
-                    retry = runtime.progress.register_retry(task_id)
-                    print(
-                        f"[RETRY] Tarefa {short_id(task_id)} reenfileirada "
-                        f"(tentativa registrada: {retry})"
-                    )
+
+                    accepted_retry = runtime.progress.register_failure_or_retry(task_id, runtime.args.max_task_retries)
+                    
+                    if accepted_retry:
+
+                        print(
+                            f"[RETRY] Tarefa {short_id(task_id)} reenfileirada "
+                            f"(tentativa registrada: {accepted_retry})"
+                        )
+
+                    else:
+                        print(
+                        f"[PROGRESSO] Tarefa {short_id(task_id)} falhou "
+                        f"definitivamente após {runtime.args.max_task_retries} tentativas."
+                            )
+                        
                 print_progress(runtime)
 
             elif event_name == "dataset_ready":
@@ -892,9 +902,21 @@ async def peer_failure_monitor(runtime: ServerRuntime) -> None:
 
 
 async def pupil_sync_service(runtime: ServerRuntime, interval: float = 2.0) -> None:
+    await runtime.job_started.wait()
     last_confirmed: Optional[str] = None
     while not runtime.stop_event.is_set():
         await asyncio.sleep(interval)
+
+        nodes = [
+            node
+            for node in runtime.global_table.get_all_nodes()
+            if node.get("ready") is True
+        ]
+
+        if not nodes:
+
+            continue
+            
         await runtime.coordinator.pupil_manager.reconcile()
         pupil = runtime.coordinator.pupil_peer
         if pupil is None:
@@ -1095,6 +1117,8 @@ async def run_server(args: argparse.Namespace) -> None:
         model_config={},
         pubsub_queue=pubsub_queue,
         task_timeout=args.task_timeout,
+        run_id=run_id,
+        max_task_retries=args.max_task_retries,
     )
     fragment_ids = coordinator.fragment_dataset(n_fragments=args.fragments)
     if len(fragment_ids) != args.fragments:
@@ -1656,7 +1680,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 async def async_main() -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    parser.add_argument("--max-task-retries", type=int, default=3, help="Limite de tentativas por tarefa")
     if args.mode == "server":
         await run_server(args)
     elif args.mode == "peer":

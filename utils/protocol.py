@@ -56,6 +56,7 @@ class JoinAck:
     fragment_id: Optional[str]
     peers: List[Dict[str, Any]]
     task: Optional[Dict[str, Any]] = None
+    run_id: str
 
     type: str = field(default=MSG_JOIN_ACK, init=False)
 
@@ -92,6 +93,7 @@ class TrainingTask:
     parametros: Dict[str, Any]
     model_type: str
     model_config: Dict[str, Any] = field(default_factory=dict)
+    run_id: str = ""
 
     type: str = field(default=MSG_TRAINING_TASK, init=False)
 
@@ -112,6 +114,7 @@ class TaskResult:
     status: Optional[str] = None
     error: Optional[str] = None
     model_bytes: Optional[bytes] = None
+    run_id: str = ""
 
     type: str = field(default=MSG_TASK_RESULT, init=False)
 
@@ -265,6 +268,7 @@ class SyncState:
 class MembershipUpdate:
     epoch: int
     peers: list
+    run_id: str = ""
     type: str = field(default=MSG_MEMBERSHIP_UPDATE, init=False)
     def to_dict(self): return asdict(self)
 
@@ -301,6 +305,7 @@ class BullyCoordinatorMsg:
 class DatasetReady:
     id_node: str
     fragment_id: str
+    run_id: str = ""
     type: str = field(default=MSG_DATASET_READY, init=False)
     def to_dict(self): return asdict(self)
 
