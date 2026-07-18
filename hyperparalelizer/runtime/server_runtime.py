@@ -66,8 +66,8 @@ def server_progress_snapshot(runtime: ServerRuntime) -> Tuple[int, int, int, int
 def print_progress(runtime: ServerRuntime) -> None:
     completed, running, waiting, failed = server_progress_snapshot(runtime)
     print(
-        f"[PROGRESS] {completed}/{runtime.progress.total_tasks} concluídas | "
-        f"{running} executando | {waiting} aguardando | {failed} falhas"
+        f"[PROGRESS] {completed}/{runtime.progress.total_tasks} ok | "
+        f"{running} rodando | {waiting} fila | {failed} falhas"
     )
 
 
@@ -375,27 +375,27 @@ async def shutdown_server_runtime(runtime: ServerRuntime) -> None:
     print("[SHUTDOWN] Mensageiro e rotinas do servidor encerrados")
 
 
+def _limits_desc(args: argparse.Namespace) -> str:
+    ram = f"{args.max_ram_mb:.0f}MiB" if args.max_ram_mb else "-"
+    cpu = f"{args.max_cpu_cores}cores" if args.max_cpu_cores else "-"
+    return f"ram={ram} cpu={cpu}"
+
+
 def print_server_header(
     args: argparse.Namespace,
     run_id: str,
     identity: DatasetIdentity,
     task_count: int,
 ) -> None:
+    pubsub = "off" if args.disable_pubsub else "on"
+    pupil = "off" if args.disable_pupil else "on"
     print(SEPARATOR)
-    print("Inicializando servidor Hyperparalelizer")
-    print(f"Run ID: {run_id}")
-    print(f"Dataset ID: {identity.short_id}")
-    print(f"Endereço: {args.host}:{args.port}")
-    print(f"Dataset: {identity.sample_count} amostras")
-    print(f"Fragmentos: {args.fragments}")
-    print(f"Tarefas: {task_count}")
-    print(f"Modelo: {DEFAULT_MODEL_TYPE}")
-    print("Maekawa: executado nos peers")
-    print(f"Pub/Sub: {'desabilitado' if args.disable_pubsub else 'bridge beta habilitado'}")
-    print(f"Pupilo: {'desabilitado' if args.disable_pupil else 'habilitado'}")
-    ram_desc = f"{args.max_ram_mb:.0f} MiB" if args.max_ram_mb else "sem limite"
-    cpu_desc = f"{args.max_cpu_cores} núcleo(s)" if args.max_cpu_cores else "sem limite"
-    print(f"Limite RAM: {ram_desc} | Limite CPU: {cpu_desc}")
+    print(f"Hyperparalelizer · servidor em {args.host}:{args.port} (run {run_id[:8]})")
+    print(
+        f"dataset={identity.sample_count} amostras ({identity.short_id}) "
+        f"fragmentos={args.fragments} tarefas={task_count} modelo={DEFAULT_MODEL_TYPE}"
+    )
+    print(f"pubsub={pubsub} pupilo={pupil} {_limits_desc(args)}")
     print(SEPARATOR)
 
 
@@ -403,16 +403,17 @@ def print_completion_summary(runtime: ServerRuntime) -> None:
     best = runtime.coordinator.get_best_model() or {}
     elapsed = time.monotonic() - runtime.progress.started_at
     print(SEPARATOR)
-    print("TREINAMENTO DISTRIBUÍDO FINALIZADO")
-    print(f"Run ID: {runtime.run_id}")
-    print(f"Total de tarefas: {runtime.progress.total_tasks}")
-    print(f"Concluídas: {runtime.progress.completed}")
-    print(f"Falhas definitivas: {runtime.progress.failed}")
-    print(f"Tempo total: {elapsed:.2f}s")
-    print(f"Melhor F1: {float(best.get('f1_score') or 0.0):.6f}")
-    print(f"Melhor task: {best.get('task_id')}")
-    print(f"Peer vencedor: {best.get('peer_id')}")
-    print(f"Hiperparâmetros vencedores: {best.get('hyperparameters')}")
+    print(
+        f"Treino finalizado (run {runtime.run_id[:8]}) em {elapsed:.1f}s — "
+        f"{runtime.progress.completed}/{runtime.progress.total_tasks} ok, "
+        f"{runtime.progress.failed} falhas"
+    )
+    print(
+        f"melhor f1={float(best.get('f1_score') or 0.0):.4f} "
+        f"task={short_id(str(best.get('task_id') or ''))} "
+        f"peer={short_id(str(best.get('peer_id') or ''))}"
+    )
+    print(f"hiperparâmetros: {best.get('hyperparameters')}")
     print(SEPARATOR)
 
 

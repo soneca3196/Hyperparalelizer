@@ -10,7 +10,6 @@ import queue
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
-from hyperparalelizer.server.server_messenger import ServerMessenger
 
 from core.network import P2PNode, send_message, send_once
 from hyperparalelizer.peer.peer_inner_protocol import (
@@ -24,6 +23,7 @@ from hyperparalelizer.peer.peer_inner_protocol import (
 )
 from hyperparalelizer.peer.peer_outer_protocol import register_peer_peer_handlers
 from hyperparalelizer.peer.trainer import TrainerNode
+from hyperparalelizer.server.server_messenger import ServerMessenger
 from hyperparalelizer.sync.bully import BullyElection
 from hyperparalelizer.sync.maekawa import MaekawaMutex
 from utils.protocol import (
@@ -68,39 +68,37 @@ from .server_runtime import (
 )
 
 
+def _limits_desc(args: argparse.Namespace) -> str:
+    ram = f"{args.max_ram_mb:.0f}MiB" if args.max_ram_mb else "-"
+    cpu = f"{args.max_cpu_cores}cores" if args.max_cpu_cores else "-"
+    return f"ram={ram} cpu={cpu}"
+
+
 def print_peer_header(
     args: argparse.Namespace,
     local_run_id: str,
     storage_dir: Path,
     identity: DatasetIdentity,
 ) -> None:
+    maekawa = "off" if args.disable_maekawa else "on"
+    bully = "off" if args.disable_bully else "on"
+    pubsub = "off" if args.disable_pubsub else "on"
     print(SEPARATOR)
-    print("Inicializando peer Hyperparalelizer")
-    print(f"Run ID local: {local_run_id}")
-    print(f"Dataset esperado: {identity.short_id}")
-    print(f"Peer: {args.host}:{args.port}")
-    print(f"Servidor: {args.server_host}:{args.server_port}")
-    print(f"Storage: {storage_dir}")
-    print(f"Reset storage: {'sim' if args.reset_storage else 'não'}")
-    print(f"Maekawa: {'desabilitado' if args.disable_maekawa else 'habilitado'}")
-    print(f"Bully: {'desabilitado' if args.disable_bully else 'habilitado'}")
-    print(f"Pub/Sub: {'desabilitado' if args.disable_pubsub else 'habilitado'}")
-    ram_desc = f"{args.max_ram_mb:.0f} MiB" if args.max_ram_mb else "sem limite"
-    cpu_desc = f"{args.max_cpu_cores} núcleo(s)" if args.max_cpu_cores else "sem limite"
-    print(f"Limite RAM: {ram_desc} | Limite CPU: {cpu_desc}")
+    print(f"Hyperparalelizer · peer {args.host}:{args.port} -> servidor {args.server_host}:{args.server_port}")
+    print(
+        f"run={local_run_id} dataset={identity.short_id} "
+        f"storage={storage_dir}{' (reset)' if args.reset_storage else ''}"
+    )
+    print(f"maekawa={maekawa} bully={bully} pubsub={pubsub} {_limits_desc(args)}")
     print(SEPARATOR)
 
 
 def print_join_summary(join: ValidatedJoin, identity: DatasetIdentity) -> None:
-    print("[JOIN VALIDADO]")
-    print(f"Node ID: {join.node_id}")
-    print(f"Fragmento atribuído: {join.fragment_id}")
-    print(f"Peers conhecidos: {len(join.peers)}")
+    task_id = join.initial_task.get("task_id") if join.initial_task else None
     print(
-        f"Tarefa inicial: "
-        f"{join.initial_task.get('task_id') if join.initial_task else None}"
+        f"[JOIN] node={short_id(join.node_id)} fragmento={join.fragment_id} "
+        f"peers={len(join.peers)} task={short_id(task_id) if task_id else '-'}"
     )
-    print(f"Dataset ID esperado: {identity.short_id}")
 
 
 def build_bully_peer_map(peers: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -414,6 +412,7 @@ async def run_peer(args: argparse.Namespace) -> None:
         producer = payload.get("id_node")
         if producer:
             print(f"[PUBSUB] Modelo produzido pelo peer {short_id(str(producer))}")
+        # O bridge publica com expect_reply=False; não responde.
         del writer
 
     p2p_node.register_handler(MSG_SYNC_STATE, handle_sync_state)
@@ -521,4 +520,3 @@ async def run_peer(args: argparse.Namespace) -> None:
             await p2p_node.stop()
         await asyncio.to_thread(messenger.stop)
         print("[SHUTDOWN] Finalizado com segurança")
-        
