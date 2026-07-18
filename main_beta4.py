@@ -9,11 +9,13 @@ Uso:
 
 import argparse
 import asyncio
+import logging
 import sys
 
 from hyperparalelizer.runtime.common import BootstrapError
 from hyperparalelizer.runtime.peer_runtime import run_peer
 from hyperparalelizer.runtime.server_runtime import run_server
+from utils.logger import set_level
 
 
 def positive_int(value: str) -> int:
@@ -74,6 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Quantidade de núcleos de CPU que o servidor pode usar",
     )
+    server.add_argument(
+        "--debug",
+        action="store_true",
+        help="Ativa logs detalhados (DEBUG). Por padrão os logs ficam em INFO",
+    )
 
     peer = subparsers.add_parser("peer", help="Inicia um nó de treinamento")
     peer.add_argument("--host", default="127.0.0.1")
@@ -101,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Quantidade de núcleos de CPU que o peer pode usar",
     )
+    peer.add_argument(
+        "--debug",
+        action="store_true",
+        help="Ativa logs detalhados (DEBUG)",
+    )
 
     return parser
 
@@ -108,6 +120,8 @@ def build_parser() -> argparse.ArgumentParser:
 async def async_main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    set_level(logging.DEBUG if args.debug else logging.INFO)
 
     if args.mode == "server":
         await run_server(args)
