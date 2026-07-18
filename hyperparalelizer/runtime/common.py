@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import csv
 import hashlib
 import json
 import os
@@ -90,6 +91,25 @@ class ServerProgress:
     completed_task_ids: Set[str] = field(default_factory=set)
     failed_task_ids: Set[str] = field(default_factory=set)
     retry_counts: Dict[str, int] = field(default_factory=dict)
+    results: List[Dict[str, Any]] = field(default_factory=list)
+
+    def record_result(
+        self,
+        task_id: str,
+        peer_id: str,
+        status: str,
+        f1_score: Optional[float],
+        hyperparameters: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.results.append(
+            {
+                "task_id": task_id,
+                "peer_id": peer_id,
+                "status": status,
+                "f1_score": f1_score,
+                "hyperparameters": hyperparameters or {},
+            }
+        )
 
     def register_success(self, task_id: str) -> None:
         if task_id:
@@ -472,6 +492,77 @@ def read_run_config() -> Tuple[str, Dict[str, List[Any]]]:
         raw.get("dataset_key", DEFAULT_DATASET_KEY),
         raw.get("grid", DEFAULT_GRID),
     )
+
+
+RESULTS_DIR = Path("results")
+
+
+def export_run_results(
+    run_id: str,
+    dataset_identity: "DatasetIdentity",
+    best_model: Optional[Dict[str, Any]],
+    all_results: List[Dict[str, Any]],
+    total_tasks: int,
+    completed: int,
+    failed: int,
+    elapsed_seconds: float,
+) -> Path:
+    """Grava, em ./results (fora de ./data, então sobrevive ao peer_runtime
+    """
+    run_dir = RESULTS_DIR / run_id[:8]
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    best_model = best_model or {}
+    summary = {
+        "run_id": run_id,
+        "dataset": {
+            "name": dataset_identity.name,
+            "sample_count": dataset_identity.sample_count,
+            "feature_count": dataset_identity.feature_count,
+            "sha256": dataset_identity.sha256,
+        },
+        "total_tasks": total_tasks,
+        "completed": completed,
+        "failed": failed,
+        "elapsed_seconds": round(elapsed_seconds, 2),
+        "best_f1_score": best_model.get("f1_score"),
+        "best_task_id": best_model.get("task_id"),
+        "best_peer_id": best_model.get("peer_id"),
+        "best_hyperparameters": best_model.get("hyperparameters"),
+        "best_metrics": {
+            k: v for k, v in (best_model.get("metrics") or {}).items()
+            if k != "model_bytes"
+        },
+    }
+    (run_dir / "summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2)
+    )
+
+    model_bytes = best_model.get("model_bytes")
+    if model_bytes:
+        (run_dir / "best_model.pkl").write_bytes(model_bytes)
+
+    if all_results:
+        csv_path = run_dir / "all_tasks.csv"
+        fieldnames = ["task_id", "peer_id", "status", "f1_score", "hyperparameters"]
+        with csv_path.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in all_results:
+                writer.writerow(
+                    {
+                        "task_id": row.get("task_id", ""),
+                        "peer_id": row.get("peer_id", ""),
+                        "status": row.get("status", ""),
+                        "f1_score": row.get("f1_score"),
+                        "hyperparameters": json.dumps(
+                            row.get("hyperparameters") or {}, ensure_ascii=False
+                        ),
+                    }
+                )
+
+    print(f"[EXPORT] Resultados salvos em '{run_dir}/' (summary.json, best_model.pkl, all_tasks.csv)")
+    return run_dir
 
 
 def clear_data_dir() -> None:

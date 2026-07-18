@@ -169,6 +169,7 @@ async def handle_task_result(
                 "status": "failed" if failed else "success",
                 "f1_score": f1_score,
                 "is_new_best": is_new_best,
+                "hyperparameters": dict(task.parametros or {}),
             })
         if failed:
             log.info(

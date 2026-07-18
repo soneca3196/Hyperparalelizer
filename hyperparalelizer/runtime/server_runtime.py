@@ -34,6 +34,7 @@ from .common import (
     cancel_tasks,
     clear_data_dir,
     create_task,
+    export_run_results,
     grid_size,
     load_reference_dataset,
     short_id,
@@ -121,6 +122,13 @@ async def status_consumer(runtime: ServerRuntime) -> None:
                 task_id = str(event.get("task_id") or "")
                 if event.get("status") == "success":
                     runtime.progress.register_success(task_id)
+                    runtime.progress.record_result(
+                        task_id=task_id,
+                        peer_id=str(event.get("peer_id") or ""),
+                        status="success",
+                        f1_score=event.get("f1_score"),
+                        hyperparameters=event.get("hyperparameters"),
+                    )
                 else:
                     accepted_retry, retry = runtime.progress.register_failure_or_retry(
                         task_id, runtime.args.max_task_retries
@@ -135,7 +143,14 @@ async def status_consumer(runtime: ServerRuntime) -> None:
                             f"[PROGRESSO] Tarefa {short_id(task_id)} falhou "
                             f"definitivamente após {runtime.args.max_task_retries} tentativas."
                         )
-                        
+                        runtime.progress.record_result(
+                            task_id=task_id,
+                            peer_id=str(event.get("peer_id") or ""),
+                            status="failed",
+                            f1_score=None,
+                            hyperparameters=event.get("hyperparameters"),
+                        )
+
                 print_progress(runtime)
 
             elif event_name == "dataset_ready":
@@ -175,6 +190,16 @@ async def scheduler_service(runtime: ServerRuntime, interval: float = 1.0) -> No
                 print_completion_summary(runtime)
             if not cleaned_up:
                 cleaned_up = True
+                export_run_results(
+                    run_id=runtime.run_id,
+                    dataset_identity=runtime.dataset_identity,
+                    best_model=runtime.coordinator.get_best_model(),
+                    all_results=runtime.progress.results,
+                    total_tasks=runtime.progress.total_tasks,
+                    completed=runtime.progress.completed,
+                    failed=runtime.progress.failed,
+                    elapsed_seconds=time.monotonic() - runtime.progress.started_at,
+                )
                 clear_data_dir()
             if runtime.args.stop_when_complete:
                 runtime.stop_event.set()
@@ -412,18 +437,18 @@ def print_server_header(
 def print_completion_summary(runtime: ServerRuntime) -> None:
     best = runtime.coordinator.get_best_model() or {}
     elapsed = time.monotonic() - runtime.progress.started_at
-    filtered_metricas = {k: v for k, v in best.get('metrics').items() if k not in {'model_bytes', 'task_id', 'type', 'run_id', 'status', 'id_node', 'error'}}
     print(SEPARATOR)
-    print("TREINAMENTO DISTRIBUÍDO FINALIZADO")
-    print(f"Run ID: {runtime.run_id}")
-    print(f"Total de tarefas: {runtime.progress.total_tasks}")
-    print(f"Concluídas: {runtime.progress.completed}")
-    print(f"Falhas definitivas: {runtime.progress.failed}")
-    print(f"Tempo total: {elapsed:.2f}s")
-    print(f"Métricas do Melhor Modelo:", filtered_metricas)
-    print(f"Melhor task: {best.get('task_id')}")
-    print(f"Peer vencedor: {best.get('peer_id')}")
-    print(f"Hiperparâmetros vencedores: {best.get('hyperparameters')}")
+    print(
+        f"Treino finalizado (run {runtime.run_id[:8]}) em {elapsed:.1f}s — "
+        f"{runtime.progress.completed}/{runtime.progress.total_tasks} ok, "
+        f"{runtime.progress.failed} falhas"
+    )
+    print(
+        f"melhor f1={float(best.get('f1_score') or 0.0):.4f} "
+        f"task={short_id(str(best.get('task_id') or ''))} "
+        f"peer={short_id(str(best.get('peer_id') or ''))}"
+    )
+    print(f"hiperparâmetros: {best.get('hyperparameters')}")
     print(SEPARATOR)
 
 
