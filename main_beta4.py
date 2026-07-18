@@ -2,13 +2,6 @@ from __future__ import annotations
 
 """hyperparalelizer.main - bootstrap e orquestração do Hyperparalelizer.
 
-Integra servidor coordenador, peers de treinamento, fragmentação de dataset,
-Maekawa, Bully, Peer Pupilo e Pub/Sub conforme a especificação do Grupo 12.
-
-A lógica de runtime (validações, classes auxiliares e os laços de execução do
-servidor/peer) vive em ``hyperparalelizer.runtime`` (common, server_runtime,
-peer_runtime). Este módulo cuida apenas do parsing de CLI e do bootstrap.
-
 Uso:
     python -m main_beta4 server --host 127.0.0.1 --port 9000 --max-ram-mb 2048 --max-cpu-cores 2
     python -m main_beta4 peer --host 127.0.0.1 --port 9101 --server-port 9000 --max-ram-mb 512 --max-cpu-cores 1
