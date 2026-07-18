@@ -1,9 +1,3 @@
-# (Pessoa 4) Nó "Barriga": orquestra tarefas e middleware
-
-# servidor STATELESS
-# O coordenador não mantém estado dinâmico interno. 
-# Todas as informações críticas de rede, tarefas e nós residem e são gerenciadas na GlobalTable.
-
 import asyncio
 import itertools
 import math
