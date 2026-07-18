@@ -24,6 +24,7 @@ from utils.resource_limits import ResourceLimitError, apply_resource_limits
 
 from .common import (
     BootstrapError,
+    DEFAULT_DATASET_KEY,
     DEFAULT_GRID,
     DEFAULT_MODEL_TYPE,
     DatasetIdentity,
@@ -31,11 +32,13 @@ from .common import (
     ServerProgress,
     SEPARATOR,
     cancel_tasks,
+    clear_data_dir,
     create_task,
     grid_size,
     load_reference_dataset,
     short_id,
     wait_for_listener,
+    write_run_config,
 )
 
 
@@ -66,8 +69,8 @@ def server_progress_snapshot(runtime: ServerRuntime) -> Tuple[int, int, int, int
 def print_progress(runtime: ServerRuntime) -> None:
     completed, running, waiting, failed = server_progress_snapshot(runtime)
     print(
-        f"[PROGRESS] {completed}/{runtime.progress.total_tasks} concluídas | "
-        f"{running} executando | {waiting} aguardando | {failed} falhas"
+        f"[PROGRESS] {completed}/{runtime.progress.total_tasks} ok | "
+        f"{running} rodando | {waiting} fila | {failed} falhas"
     )
 
 
@@ -152,6 +155,7 @@ async def status_consumer(runtime: ServerRuntime) -> None:
 
 async def scheduler_service(runtime: ServerRuntime, interval: float = 1.0) -> None:
     await runtime.job_started.wait()
+    cleaned_up = False
     while not runtime.stop_event.is_set():
         timed_out = runtime.coordinator.check_task_status()
         for task_id in timed_out:
@@ -165,7 +169,13 @@ async def scheduler_service(runtime: ServerRuntime, interval: float = 1.0) -> No
         await runtime.coordinator.dispatch_all_idle()
 
         if is_formally_complete(runtime):
+            was_complete = runtime.complete_event.is_set()
             runtime.complete_event.set()
+            if not was_complete:
+                print_completion_summary(runtime)
+            if not cleaned_up:
+                cleaned_up = True
+                clear_data_dir()
             if runtime.args.stop_when_complete:
                 runtime.stop_event.set()
                 return
@@ -313,7 +323,7 @@ async def wait_for_minimum_peers(runtime: ServerRuntime) -> None:
 
     # No modo min-peers o grid é criado somente aqui, portanto nenhum JoinAck
     # anterior reservou tarefa. O scheduler fará o primeiro dispatch por TCP.
-    runtime.coordinator.generate_grid_search(DEFAULT_GRID)
+    runtime.coordinator.generate_grid_search(getattr(runtime.args, "grid", None) or DEFAULT_GRID)
     runtime.job_started.set()
     print("[START] Iniciando distribuição das tarefas")
 
@@ -375,27 +385,27 @@ async def shutdown_server_runtime(runtime: ServerRuntime) -> None:
     print("[SHUTDOWN] Mensageiro e rotinas do servidor encerrados")
 
 
+def _limits_desc(args: argparse.Namespace) -> str:
+    ram = f"{args.max_ram_mb:.0f}MiB" if args.max_ram_mb else "-"
+    cpu = f"{args.max_cpu_cores}cores" if args.max_cpu_cores else "-"
+    return f"ram={ram} cpu={cpu}"
+
+
 def print_server_header(
     args: argparse.Namespace,
     run_id: str,
     identity: DatasetIdentity,
     task_count: int,
 ) -> None:
+    pubsub = "off" if args.disable_pubsub else "on"
+    pupil = "off" if args.disable_pupil else "on"
     print(SEPARATOR)
-    print("Inicializando servidor Hyperparalelizer")
-    print(f"Run ID: {run_id}")
-    print(f"Dataset ID: {identity.short_id}")
-    print(f"Endereço: {args.host}:{args.port}")
-    print(f"Dataset: {identity.sample_count} amostras")
-    print(f"Fragmentos: {args.fragments}")
-    print(f"Tarefas: {task_count}")
-    print(f"Modelo: {DEFAULT_MODEL_TYPE}")
-    print("Maekawa: executado nos peers")
-    print(f"Pub/Sub: {'desabilitado' if args.disable_pubsub else 'bridge beta habilitado'}")
-    print(f"Pupilo: {'desabilitado' if args.disable_pupil else 'habilitado'}")
-    ram_desc = f"{args.max_ram_mb:.0f} MiB" if args.max_ram_mb else "sem limite"
-    cpu_desc = f"{args.max_cpu_cores} núcleo(s)" if args.max_cpu_cores else "sem limite"
-    print(f"Limite RAM: {ram_desc} | Limite CPU: {cpu_desc}")
+    print(f"Hyperparalelizer · servidor em {args.host}:{args.port} (run {run_id[:8]})")
+    print(
+        f"dataset={identity.sample_count} amostras ({identity.short_id}) "
+        f"fragmentos={args.fragments} tarefas={task_count} modelo={DEFAULT_MODEL_TYPE}"
+    )
+    print(f"pubsub={pubsub} pupilo={pupil} {_limits_desc(args)}")
     print(SEPARATOR)
 
 
@@ -427,9 +437,13 @@ async def run_server(args: argparse.Namespace) -> None:
     except ResourceLimitError as exc:
         raise BootstrapError(str(exc)) from exc
 
-    X, y, identity = load_reference_dataset()
+    dataset_key = getattr(args, "dataset_key", None) or DEFAULT_DATASET_KEY
+    grid = getattr(args, "grid", None) or DEFAULT_GRID
+    write_run_config(dataset_key, grid)
+
+    X, y, identity = load_reference_dataset(dataset_key)
     run_id = uuid.uuid4().hex
-    total_tasks = grid_size(DEFAULT_GRID)
+    total_tasks = grid_size(grid)
     pubsub_queue: Optional[queue.Queue] = (
         None if args.disable_pubsub else queue.Queue()
     )
@@ -455,7 +469,7 @@ async def run_server(args: argparse.Namespace) -> None:
     # Fluxo normal: tarefa inicial reservada por add_peer e enviada no JoinAck.
     # Com min_peers > 1, o grid é adiado para impedir reserva prematura.
     if args.min_peers <= 1:
-        coordinator.generate_grid_search(DEFAULT_GRID)
+        coordinator.generate_grid_search(grid)
 
     messenger = ServerMessenger(
         coordinator=coordinator,
@@ -477,11 +491,7 @@ async def run_server(args: argparse.Namespace) -> None:
     await start_server_runtime(runtime)
 
     try:
-        if args.stop_when_complete:
-            await runtime.complete_event.wait()
-            print_completion_summary(runtime)
-        else:
-            await runtime.stop_event.wait()
+        await runtime.stop_event.wait()
     except asyncio.CancelledError:
         raise
     finally:
