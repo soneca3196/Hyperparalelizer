@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import contextlib
 import hashlib
+import json
 import os
 import pickle
 import queue
@@ -19,7 +20,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
-from sklearn.datasets import load_breast_cancer
 
 from core.network import send_once
 from hyperparalelizer.ml.dataset_loader import DatasetLoader
@@ -37,8 +37,6 @@ from utils.protocol import (
 
 
 
-DATASET_NAME = "sklearn.load_breast_cancer"
-EXPECTED_SAMPLE_COUNT = 569
 DEFAULT_MODEL_TYPE = "random_forest"
 DEFAULT_GRID: Dict[str, List[Any]] = {
     "n_estimators": [1, 2, 3, 4, 5, 18, 19, 20, 30],
@@ -47,6 +45,13 @@ DEFAULT_GRID: Dict[str, List[Any]] = {
     "n_jobs": [1],
 }
 SEPARATOR = "=" * 60
+
+AVAILABLE_DATASETS: Dict[str, Tuple[str, str]] = {
+    "1": ("credito", "dataset/dataset_risco_credito_3000.csv (risco de crédito)"),
+}
+DEFAULT_DATASET_KEY = "credito"
+
+RUN_CONFIG_PATH = Path("data") / "run_config.json"
 
 
 class BootstrapError(RuntimeError):
@@ -415,16 +420,69 @@ def build_dataset_identity(name: str, X: np.ndarray, y: np.ndarray) -> DatasetId
     )
 
 
-def load_reference_dataset() -> Tuple[np.ndarray, np.ndarray, DatasetIdentity]:
-    dataset = load_breast_cancer()
-    X = dataset.data
-    y = dataset.target
-    identity = build_dataset_identity(DATASET_NAME, X, y)
-    if identity.sample_count != EXPECTED_SAMPLE_COUNT:
+def _load_credito_csv_dataset() -> Tuple[np.ndarray, np.ndarray, str]:
+    import pandas as pd
+
+    csv_path = Path("dataset") / "dataset_risco_credito_3000.csv"
+    if not csv_path.is_file():
+        raise BootstrapError(f"Dataset não encontrado: {csv_path}")
+    df = pd.read_csv(csv_path)
+    if "inadimplente" not in df.columns:
         raise BootstrapError(
-            f"Dataset de referência inesperado: {identity.sample_count} amostras"
+            f"Dataset '{csv_path}' não possui a coluna alvo 'inadimplente'"
         )
+    y = df["inadimplente"].to_numpy()
+    X = df.drop(columns=["inadimplente"]).to_numpy(dtype=float)
+    return X, y, f"csv:{csv_path.name}"
+
+
+def load_reference_dataset(
+    dataset_key: str = DEFAULT_DATASET_KEY,
+) -> Tuple[np.ndarray, np.ndarray, DatasetIdentity]:
+    if dataset_key == "credito":
+        X, y, name = _load_credito_csv_dataset()
+    else:
+        raise BootstrapError(f"dataset_key desconhecido: {dataset_key}")
+
+    identity = build_dataset_identity(name, X, y)
     return X, y, identity
+
+
+def write_run_config(dataset_key: str, grid: Dict[str, List[Any]]) -> None:
+    """Publica a escolha de dataset/hiperparâmetros do servidor para os peers."""
+    RUN_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RUN_CONFIG_PATH.write_text(
+        json.dumps({"dataset_key": dataset_key, "grid": grid}, ensure_ascii=False)
+    )
+
+
+def read_run_config() -> Tuple[str, Dict[str, List[Any]]]:
+    """Lê a escolha de dataset/hiperparâmetros publicada pelo servidor.
+
+    Se o servidor ainda não publicou nada (ex.: peer subiu antes), cai nos
+    valores padrão (DEFAULT_DATASET_KEY + DEFAULT_GRID).
+    """
+    if not RUN_CONFIG_PATH.is_file():
+        return DEFAULT_DATASET_KEY, DEFAULT_GRID
+    try:
+        raw = json.loads(RUN_CONFIG_PATH.read_text())
+    except (OSError, ValueError):
+        return DEFAULT_DATASET_KEY, DEFAULT_GRID
+    return (
+        raw.get("dataset_key", DEFAULT_DATASET_KEY),
+        raw.get("grid", DEFAULT_GRID),
+    )
+
+
+def clear_data_dir() -> None:
+    """Remove tudo em ./data (fragmentos, resultados pendentes, run_config)
+    assim que o treino é dado como concluído."""
+    data_root = Path("data")
+    if not data_root.exists():
+        return
+    file_count = sum(1 for path in data_root.rglob("*") if path.is_file())
+    shutil.rmtree(data_root, ignore_errors=True)
+    print(f"[CLEANUP] 'data/' removido após conclusão do treino ({file_count} arquivo(s))")
 
 
 def grid_size(grid: Dict[str, Sequence[Any]]) -> int:

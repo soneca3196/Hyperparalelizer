@@ -53,6 +53,7 @@ from .common import (
     load_reference_dataset,
     normalize_peers,
     prepare_storage,
+    read_run_config,
     resolve_storage_dir,
     short_id,
     validate_ack,
@@ -231,6 +232,8 @@ async def promoted_server_from_peer(
     promoted_args.min_peers = 1
     promoted_args.peer_wait_timeout = 0.0
     promoted_args.disable_pupil = False
+    promoted_args.max_task_retries = getattr(args, "max_task_retries", 3)
+    promoted_args.dataset_key, promoted_args.grid = read_run_config()
 
     remaining = 0
     with coordinator.GlobalTable.lock:
@@ -250,7 +253,7 @@ async def promoted_server_from_peer(
         progress=ServerProgress(total_tasks=remaining),
         heartbeat=ServerHeartbeatTracker(),
         run_id=f"promoted-{uuid.uuid4().hex}",
-        dataset_identity=load_reference_dataset()[2],
+        dataset_identity=load_reference_dataset(read_run_config()[0])[2],
         args=promoted_args,
         pubsub_queue=None if args.disable_pubsub else queue.Queue(),
     )
@@ -276,7 +279,8 @@ async def run_peer(args: argparse.Namespace) -> None:
     except ResourceLimitError as exc:
         raise BootstrapError(str(exc)) from exc
 
-    _, _, identity = load_reference_dataset()
+    dataset_key, _grid = read_run_config()
+    _, _, identity = load_reference_dataset(dataset_key)
     local_run_id = f"peer-{args.port}-{uuid.uuid4().hex[:8]}"
     storage_dir = prepare_storage(resolve_storage_dir(args), args.reset_storage)
     spool_dir = storage_dir.parent / "pending_results"

@@ -24,6 +24,7 @@ from utils.resource_limits import ResourceLimitError, apply_resource_limits
 
 from .common import (
     BootstrapError,
+    DEFAULT_DATASET_KEY,
     DEFAULT_GRID,
     DEFAULT_MODEL_TYPE,
     DatasetIdentity,
@@ -31,11 +32,13 @@ from .common import (
     ServerProgress,
     SEPARATOR,
     cancel_tasks,
+    clear_data_dir,
     create_task,
     grid_size,
     load_reference_dataset,
     short_id,
     wait_for_listener,
+    write_run_config,
 )
 
 
@@ -152,6 +155,7 @@ async def status_consumer(runtime: ServerRuntime) -> None:
 
 async def scheduler_service(runtime: ServerRuntime, interval: float = 1.0) -> None:
     await runtime.job_started.wait()
+    cleaned_up = False
     while not runtime.stop_event.is_set():
         timed_out = runtime.coordinator.check_task_status()
         for task_id in timed_out:
@@ -165,7 +169,13 @@ async def scheduler_service(runtime: ServerRuntime, interval: float = 1.0) -> No
         await runtime.coordinator.dispatch_all_idle()
 
         if is_formally_complete(runtime):
+            was_complete = runtime.complete_event.is_set()
             runtime.complete_event.set()
+            if not was_complete:
+                print_completion_summary(runtime)
+            if not cleaned_up:
+                cleaned_up = True
+                clear_data_dir()
             if runtime.args.stop_when_complete:
                 runtime.stop_event.set()
                 return
@@ -313,7 +323,7 @@ async def wait_for_minimum_peers(runtime: ServerRuntime) -> None:
 
     # No modo min-peers o grid é criado somente aqui, portanto nenhum JoinAck
     # anterior reservou tarefa. O scheduler fará o primeiro dispatch por TCP.
-    runtime.coordinator.generate_grid_search(DEFAULT_GRID)
+    runtime.coordinator.generate_grid_search(getattr(runtime.args, "grid", None) or DEFAULT_GRID)
     runtime.job_started.set()
     print("[START] Iniciando distribuição das tarefas")
 
@@ -427,9 +437,13 @@ async def run_server(args: argparse.Namespace) -> None:
     except ResourceLimitError as exc:
         raise BootstrapError(str(exc)) from exc
 
-    X, y, identity = load_reference_dataset()
+    dataset_key = getattr(args, "dataset_key", None) or DEFAULT_DATASET_KEY
+    grid = getattr(args, "grid", None) or DEFAULT_GRID
+    write_run_config(dataset_key, grid)
+
+    X, y, identity = load_reference_dataset(dataset_key)
     run_id = uuid.uuid4().hex
-    total_tasks = grid_size(DEFAULT_GRID)
+    total_tasks = grid_size(grid)
     pubsub_queue: Optional[queue.Queue] = (
         None if args.disable_pubsub else queue.Queue()
     )
@@ -455,7 +469,7 @@ async def run_server(args: argparse.Namespace) -> None:
     # Fluxo normal: tarefa inicial reservada por add_peer e enviada no JoinAck.
     # Com min_peers > 1, o grid é adiado para impedir reserva prematura.
     if args.min_peers <= 1:
-        coordinator.generate_grid_search(DEFAULT_GRID)
+        coordinator.generate_grid_search(grid)
 
     messenger = ServerMessenger(
         coordinator=coordinator,
@@ -477,11 +491,7 @@ async def run_server(args: argparse.Namespace) -> None:
     await start_server_runtime(runtime)
 
     try:
-        if args.stop_when_complete:
-            await runtime.complete_event.wait()
-            print_completion_summary(runtime)
-        else:
-            await runtime.stop_event.wait()
+        await runtime.stop_event.wait()
     except asyncio.CancelledError:
         raise
     finally:
