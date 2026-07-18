@@ -402,6 +402,7 @@ def print_server_header(
 def print_completion_summary(runtime: ServerRuntime) -> None:
     best = runtime.coordinator.get_best_model() or {}
     elapsed = time.monotonic() - runtime.progress.started_at
+    filtered_metricas = {k: v for k, v in best.get('metrics').items() if k not in {'model_bytes', 'task_id', 'type', 'run_id', 'status', 'id_node', 'error'}}
     print(SEPARATOR)
     print("TREINAMENTO DISTRIBUÍDO FINALIZADO")
     print(f"Run ID: {runtime.run_id}")
@@ -409,7 +410,7 @@ def print_completion_summary(runtime: ServerRuntime) -> None:
     print(f"Concluídas: {runtime.progress.completed}")
     print(f"Falhas definitivas: {runtime.progress.failed}")
     print(f"Tempo total: {elapsed:.2f}s")
-    print(f"Melhor F1: {float(best.get('f1_score') or 0.0):.6f}")
+    print(f"Métricas do Melhor Modelo:", filtered_metricas)
     print(f"Melhor task: {best.get('task_id')}")
     print(f"Peer vencedor: {best.get('peer_id')}")
     print(f"Hiperparâmetros vencedores: {best.get('hyperparameters')}")
